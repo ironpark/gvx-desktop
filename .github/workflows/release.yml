@@ -1,150 +1,563 @@
 name: Release
 
-# A tag vX.Y.Z releases the app. For Apple silicon Macs ggui build makes
-# gvx Desktop.app and its disk image, the image becomes the tag's GitHub
-# release, and a cask for it goes to the Homebrew tap ironpark/homebrew-tap
-# (release/cask.sh writes it), so that
+# Builds, verifies, attests, and publishes GVX Desktop releases.
 #
-#	brew install --cask ironpark/tap/gvx-desktop
+# Triggers:
+#   - Push of a vX.Y.Z (or vX.Y.Z-rc.1) tag: builds all targets, checks
+#     reproducibility, signs SLSA v1.0 Build Provenance via GitHub Artifact
+#     Attestations (actions/attest + Sigstore), publishes the GitHub release
+#     atomically, and updates downstream package managers for stable tags.
+#   - Pull request touching release files: executes the full build, test,
+#     reproducibility, and packaging pipeline as a dry run without publishing.
+#   - Manual workflow_dispatch: runs a dry run by default, or rebuilds and
+#     uploads Windows and Linux packages for an existing tag when dry_run is
+#     false.
 #
-# installs it. gvx itself is released for Apple silicon only, hence no Intel
-# build for the Mac. For Windows, on Intel and AMD and on Arm, ggui build
-# cross-builds GVX Desktop.exe, which is added to the release in a zip.
+# Toolchain versions (Go, ggui CLI, GOPROXY, GOSUMDB, GOAMD64, GOARM64) are
+# pinned in release/toolchain.env and driven by release/repro-build.sh so that
+# CI and local builds produce identical artifacts.
 #
-# For Linux, on amd64 and arm64, ggui build makes the tree for /usr and of
-# it a tarball and Debian and RPM packages, which are added to the release;
-# the Debian package for the runner's CPU is installed there first, to see
-# that it installs.
-#
-# A Chocolatey package that installs from those zips is set up but off: the
-# chocolatey job runs only when the repository variable CHOCO_PUBLISH is
-# true. It then makes the package of release/choco.sh's files, tries it on
-# a Windows runner, adds it to the release, and pushes it to chocolatey.org,
-# so that
-#
-#	choco install gvx-desktop
-#
-# installs it once the package is listed there.
-#
-# Run by hand with a tag that is already released, the workflow builds the
-# Windows programs and the Linux packages (and, when it is on, the
-# Chocolatey package) for it again
-# and puts them in its release, leaving the disk image and the cask as they
-# are, and pushing nothing to chocolatey.org, where a version cannot be
-# replaced.
-#
-# Secrets, all optional but the first:
-#
-#	TAP_GITHUB_TOKEN       a token that may write to ironpark/homebrew-tap
-#	GGUI_P12_BASE64        a Developer ID Application certificate and key,
-#	GGUI_P12_PASSWORD      as base64 of the .p12, and its password
-#	NOTARY_API_KEY_JSON    an App Store Connect API key to notarize with:
-#	                       {"issuer_id", "key_id", "private_key"}
-#	CHOCO_API_KEY          a chocolatey.org API key, to push the package
-#	                       there; without it the package is only added to
-#	                       the release
-#
-# Without the certificate the app is signed ad hoc, and the cask takes the
-# download's quarantine off it with xattr, so that Gatekeeper lets it open.
+# Optional secrets:
+#   TAP_GITHUB_TOKEN     Token with write access to ironpark/homebrew-tap
+#   GGUI_P12_BASE64      Base64-encoded Developer ID Application .p12 bundle
+#   GGUI_P12_PASSWORD    Password for GGUI_P12_BASE64
+#   NOTARY_API_KEY_JSON  App Store Connect API key JSON for Apple notarization
+#   CHOCO_API_KEY        chocolatey.org API key (used when CHOCO_PUBLISH=true)
 on:
   push:
     tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'release/**'
+      - 'ggui.toml'
+      - 'go.mod'
+      - 'go.sum'
   workflow_dispatch:
     inputs:
       tag:
-        description: A released tag to build the Windows programs for again, such as v0.1.0
-        required: true
+        description: 'Released tag to rebuild (for example v0.7.0). Leave empty for a dry run on this ref.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Build and verify without publishing to GitHub Releases'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
-  contents: write
+  contents: read
 
-# One release at a time, and never one cut off half way.
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    if: github.event_name == 'push'
-    # On Linux: ggui build makes the bundle and its disk image on any host
-    # and signs it itself, ad hoc, or with the certificate through the
-    # rcodesign that go install links in where there is a C compiler.
-    runs-on: ubuntu-latest
+  # Resolves an immutable commit SHA, release metadata, SOURCE_DATE_EPOCH, and
+  # pinned toolchain versions once so every downstream job builds from the same
+  # source revision and configuration.
+  prepare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      commit_sha: ${{ steps.meta.outputs.commit_sha }}
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      app_name: ${{ steps.meta.outputs.app_name }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      publish_mode: ${{ steps.meta.outputs.publish_mode }}
+      source_date_epoch: ${{ steps.meta.outputs.source_date_epoch }}
+      go_version: ${{ steps.meta.outputs.go_version }}
+      ggui_version: ${{ steps.meta.outputs.ggui_version }}
+      goproxy: ${{ steps.meta.outputs.goproxy }}
+      gosumdb: ${{ steps.meta.outputs.gosumdb }}
+      goamd64: ${{ steps.meta.outputs.goamd64 }}
+      goarm64: ${{ steps.meta.outputs.goarm64 }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version-file: go.mod
-      - name: Version
-        id: version
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve release metadata
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          set -eu
+          . ./release/toolchain.env
+
+          publish_mode="dry-run"
+          target_tag=""
+          commit_sha="$(git rev-parse HEAD)"
+
+          if [ "$EVENT_NAME" = "push" ]; then
+            target_tag="$REF_NAME"
+            publish_mode="create"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_TAG" ]; then
+            if ! printf '%s' "$INPUT_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
+              echo "::error::invalid tag format: $INPUT_TAG"
+              exit 1
+            fi
+            target_tag="$INPUT_TAG"
+            git rev-parse --verify --quiet "refs/tags/$target_tag^{commit}" >/dev/null || {
+              echo "::error::tag $target_tag does not exist in this repository"
+              exit 1
+            }
+            commit_sha="$(git rev-parse "refs/tags/$target_tag^{commit}")"
+            git checkout --detach --quiet "$commit_sha"
+            if [ "$INPUT_DRY_RUN" != "true" ]; then
+              publish_mode="upload"
+            fi
+          fi
+
           configured="$(sed -n 's/^version = "\(.*\)"$/\1/p' ggui.toml)"
-          if [ "$version" != "$configured" ]; then
-            echo "::error::the tag says $version, ggui.toml says $configured"
+          app_name="$(sed -n 's/^name = "\(.*\)"$/\1/p' ggui.toml)"
+          if [ -z "$configured" ] || [ -z "$app_name" ]; then
+            echo "::error::ggui.toml must define app name and version"
             exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "name=$(sed -n 's/^name = "\(.*\)"$/\1/p' ggui.toml)" >> "$GITHUB_OUTPUT"
-      # The tests draw text offscreen, which takes Mesa and a font with Korean.
-      - name: Fonts and Mesa
+
+          if [ -n "$target_tag" ]; then
+            version="${target_tag#v}"
+            if [ "$version" != "$configured" ]; then
+              echo "::error::tag $target_tag says $version, but ggui.toml says $configured"
+              exit 1
+            fi
+          else
+            version="$configured"
+            target_tag="dryrun-$configured"
+          fi
+
+          prerelease="false"
+          case "$target_tag" in
+            *-*) prerelease="true" ;;
+          esac
+
+          epoch="$(git log -1 --format=%ct "$commit_sha")"
+          {
+            echo "commit_sha=$commit_sha"
+            echo "tag=$target_tag"
+            echo "version=$version"
+            echo "app_name=$app_name"
+            echo "prerelease=$prerelease"
+            echo "publish_mode=$publish_mode"
+            echo "source_date_epoch=$epoch"
+            echo "go_version=$GO_VERSION"
+            echo "ggui_version=$GGUI_VERSION"
+            echo "goproxy=$GOPROXY"
+            echo "gosumdb=$GOSUMDB"
+            echo "goamd64=$GOAMD64"
+            echo "goarm64=$GOARM64"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "commit_sha=$commit_sha"
+          echo "tag=$target_tag version=$version mode=$publish_mode epoch=$epoch"
+          echo "toolchain=go$GO_VERSION ggui=$GGUI_VERSION"
+
+  # Runs unit tests before building release artifacts so broken revisions never
+  # reach packaging or attestation.
+  test:
+    needs: prepare
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout immutable commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+          persist-credentials: false
+      - name: Set up pinned Go toolchain
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: ${{ needs.prepare.outputs.go_version }}
+      - name: Install offscreen rendering dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y fonts-nanum libegl1 libegl-mesa0 libgl1 libgl1-mesa-dri
-      - name: Test
-        run: go test -short ./...
-      - name: Install the ggui command
-        run: go install github.com/ironpark/ggui/cmd/ggui@latest
-      - name: Build
+      - name: Run unit tests
+        env:
+          GO111MODULE: 'on'
+          GOPROXY: ${{ needs.prepare.outputs.goproxy }}
+          GOSUMDB: ${{ needs.prepare.outputs.gosumdb }}
+          GOTOOLCHAIN: go${{ needs.prepare.outputs.go_version }}
+        run: go test -mod=readonly -short ./...
+
+  build-macos:
+    needs: [prepare, test]
+    if: needs.prepare.outputs.publish_mode != 'upload'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    outputs:
+      signing: ${{ steps.build.outputs.signing }}
+      dmg: ${{ steps.build.outputs.dmg }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - name: Checkout immutable commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+          persist-credentials: false
+      - name: Set up pinned Go toolchain
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: ${{ needs.prepare.outputs.go_version }}
+      - name: Install pinned ggui CLI
+        env:
+          GGUI_CGO: ${{ secrets.GGUI_P12_BASE64 != '' && '1' || '0' }}
+        run: |
+          ./release/repro-build.sh install-ggui "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Build and verify macOS arm64 bundle and DMG
         id: build
         env:
           GGUI_P12_BASE64: ${{ secrets.GGUI_P12_BASE64 }}
           GGUI_P12_PASSWORD: ${{ secrets.GGUI_P12_PASSWORD }}
           NOTARY_API_KEY_JSON: ${{ secrets.NOTARY_API_KEY_JSON }}
-          VERSION: ${{ steps.version.outputs.version }}
-          NAME: ${{ steps.version.outputs.name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          APP_NAME: ${{ needs.prepare.outputs.app_name }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
         run: |
+          set -eu
           signing=adhoc
-          set -- --dmg --ldflags "-X main.version=$VERSION"
+          set --
           if [ -n "$GGUI_P12_BASE64" ]; then
             signing=identity
             set -- "$@" --identity "Developer ID Application"
             if [ -n "$NOTARY_API_KEY_JSON" ]; then
               printf '%s' "$NOTARY_API_KEY_JSON" > "$RUNNER_TEMP/notary.json"
+              chmod 600 "$RUNNER_TEMP/notary.json"
               set -- "$@" --notarize --api-key-file "$RUNNER_TEMP/notary.json"
             fi
           fi
-          GOARCH=arm64 ggui build --target macos "$@"
-          release/check-bundle.sh
+          ./release/repro-build.sh package macos arm64 "$VERSION" dist "$@"
+          rm -f "$RUNNER_TEMP/notary.json"
+
+          exe="dist/$APP_NAME.app/Contents/MacOS/gvx-desktop"
+          ./release/repro-build.sh verify-binary "$exe" darwin arm64
+
           dmg="gvx-desktop-$VERSION-macos-arm64.dmg"
-          mv "build/$NAME.dmg" "$dmg"
-          sha256sum "$dmg" > "$dmg.sha256"
-          echo "signing=$signing" >> "$GITHUB_OUTPUT"
-          echo "dmg=$dmg" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(cut -d' ' -f1 "$dmg.sha256")" >> "$GITHUB_OUTPUT"
-      - name: Release
+          mkdir -p out
+          mv "dist/$dmg" "out/$dmg"
+          sha256="$(sha256sum "out/$dmg" | awk '{print $1}')"
+          {
+            echo "signing=$signing"
+            echo "dmg=$dmg"
+            echo "sha256=$sha256"
+          } >> "$GITHUB_OUTPUT"
+          ls -lh "out/$dmg"
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-macos-arm64
+          path: out/gvx-desktop-*-macos-arm64.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    needs: [prepare, test]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    outputs:
+      amd64: ${{ steps.build.outputs.amd64 }}
+      arm64: ${{ steps.build.outputs.arm64 }}
+    steps:
+      - name: Checkout immutable commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+          persist-credentials: false
+      - name: Set up pinned Go toolchain
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: ${{ needs.prepare.outputs.go_version }}
+      - name: Install pinned ggui CLI
+        run: |
+          ./release/repro-build.sh install-ggui "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Build Windows zips and verify bit-for-bit reproducibility
+        id: build
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          APP_NAME: ${{ needs.prepare.outputs.app_name }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+        run: |
+          set -eu
+          mkdir -p out
+          for arch in amd64 arm64; do
+            ./release/repro-build.sh package windows "$arch" "$VERSION" "build/$arch"
+            ./release/repro-build.sh verify-binary "build/$arch/$APP_NAME.exe" windows "$arch"
+            zip="gvx-desktop-$VERSION-windows-$arch.zip"
+            cp "build/$arch/$zip" "out/$zip"
+            sum="$(sha256sum "out/$zip" | awk '{print $1}')"
+            echo "$arch=$sum" >> "$GITHUB_OUTPUT"
+          done
+
+          # Rebuild windows/amd64 in a separate output directory with a clean
+          # build cache and verify the zip digest matches bit for bit.
+          repro_cache="$(mktemp -d)"
+          repro_out="$(mktemp -d)"
+          trap 'rm -rf "$repro_cache" "$repro_out"' EXIT
+          GOCACHE="$repro_cache" ./release/repro-build.sh package windows amd64 "$VERSION" "$repro_out"
+          zip_amd64="gvx-desktop-$VERSION-windows-amd64.zip"
+          sum_a="$(sha256sum "out/$zip_amd64" | awk '{print $1}')"
+          sum_b="$(sha256sum "$repro_out/$zip_amd64" | awk '{print $1}')"
+          if [ "$sum_a" != "$sum_b" ]; then
+            echo "::error::Windows amd64 zip is not reproducible: $sum_a != $sum_b"
+            exit 1
+          fi
+          echo "Reproducibility verified for $zip_amd64 ($sum_a)"
+          ls -lh out/*.zip
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-windows
+          path: out/gvx-desktop-*-windows-*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux:
+    needs: [prepare, test]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout immutable commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+          persist-credentials: false
+      - name: Set up pinned Go toolchain
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: ${{ needs.prepare.outputs.go_version }}
+      - name: Install pinned ggui CLI
+        run: |
+          ./release/repro-build.sh install-ggui "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Build Linux archives and verify bit-for-bit reproducibility
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+        run: |
+          set -eu
+          mkdir -p out
+          for arch in amd64 arm64; do
+            ./release/repro-build.sh package linux "$arch" "$VERSION" "build/$arch"
+            ./release/repro-build.sh verify-binary "build/$arch/gvx-desktop-linux-$arch/usr/bin/gvx-desktop" linux "$arch"
+            cp "build/$arch"/*.tar.gz "build/$arch"/*.deb "build/$arch"/*.rpm out/
+          done
+
+          # Rebuild linux/amd64 with a fresh Go build cache and verify tarball,
+          # Debian, and RPM outputs match bit for bit.
+          repro_cache="$(mktemp -d)"
+          repro_out="$(mktemp -d)"
+          trap 'rm -rf "$repro_cache" "$repro_out"' EXIT
+          GOCACHE="$repro_cache" ./release/repro-build.sh package linux amd64 "$VERSION" "$repro_out"
+          for f in \
+            "gvx-desktop-$VERSION-linux-amd64.tar.gz" \
+            "gvx-desktop_${VERSION}_amd64.deb" \
+            "gvx-desktop-$VERSION-1.x86_64.rpm"
+          do
+            sum_a="$(sha256sum "out/$f" | awk '{print $1}')"
+            sum_b="$(sha256sum "$repro_out/$f" | awk '{print $1}')"
+            if [ "$sum_a" != "$sum_b" ]; then
+              echo "::error::Linux artifact $f is not reproducible: $sum_a != $sum_b"
+              exit 1
+            fi
+            echo "Reproducibility verified for $f ($sum_a)"
+          done
+          ls -lh out/
+      - name: Test installing the Debian package
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ./out/gvx-desktop_*_amd64.deb
+          test -x /usr/bin/gvx-desktop
+          test -f /usr/share/applications/io.github.ironpark.gvx-desktop.desktop
+          dpkg -s gvx-desktop | grep -E '^(Version|Maintainer|Homepage)'
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-linux
+          path: |
+            out/*.tar.gz
+            out/*.deb
+            out/*.rpm
+          if-no-files-found: error
+          retention-days: 7
+
+  # Collects all built artifacts, writes checksums and transparent build
+  # metadata, generates and verifies signed SLSA v1.0 build provenance via
+  # Sigstore, and publishes the GitHub release atomically on tag pushes.
+  publish:
+    needs: [prepare, build-macos, build-windows, build-linux]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.build-windows.result == 'success' &&
+      needs.build-linux.result == 'success' &&
+      (needs.build-macos.result == 'success' || needs.build-macos.result == 'skipped')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Write checksums and build manifest
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          COMMIT_SHA: ${{ needs.prepare.outputs.commit_sha }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+          GO_VERSION: ${{ needs.prepare.outputs.go_version }}
+          GGUI_VERSION: ${{ needs.prepare.outputs.ggui_version }}
+          GOPROXY: ${{ needs.prepare.outputs.goproxy }}
+          GOSUMDB: ${{ needs.prepare.outputs.gosumdb }}
+          GOAMD64: ${{ needs.prepare.outputs.goamd64 }}
+          GOARM64: ${{ needs.prepare.outputs.goarm64 }}
+          PUBLISH_MODE: ${{ needs.prepare.outputs.publish_mode }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          mkdir -p meta
+          (
+            cd dist
+            LC_ALL=C ls -1 | while IFS= read -r f; do
+              sha256sum -- "$f" > "../meta/$f.sha256"
+              sha256sum -- "$f"
+            done
+          ) > meta/SHA256SUMS
+          cat meta/SHA256SUMS
+
+          cat > meta/BUILD_INFO.txt <<EOF
+          repository=$REPOSITORY
+          tag=$TAG
+          version=$VERSION
+          commit=$COMMIT_SHA
+          source_date_epoch=$SOURCE_DATE_EPOCH
+          go_version=$GO_VERSION
+          ggui_version=$GGUI_VERSION
+          goproxy=$GOPROXY
+          gosumdb=$GOSUMDB
+          goamd64=$GOAMD64
+          goarm64=$GOARM64
+          workflow_run=$RUN_URL
+
+          # Reproduce release packages from commit $COMMIT_SHA:
+          SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH ./release/repro-build.sh install-ggui
+          SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH ./release/repro-build.sh package windows amd64 $VERSION ./out
+          SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH ./release/repro-build.sh package linux amd64 $VERSION ./out
+
+          # Install a reproducible standalone binary directly from proxy.golang.org:
+          GO111MODULE=on GOPROXY=$GOPROXY GOSUMDB=$GOSUMDB CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=$GOAMD64 GOTOOLCHAIN=go$GO_VERSION go install -trimpath -pgo=off -compiler=gc -ldflags='-buildid= -s -w -X main.version=$VERSION -X github.com/ironpark/ggui.buildID=io.github.ironpark.gvx-desktop' -- github.com/ironpark/gvx-desktop@v$VERSION
+          EOF
+          cat meta/BUILD_INFO.txt
+      # Fork pull requests do not receive a GitHub OIDC token, so attestation
+      # runs on tag pushes, manual runs, and same-repository pull requests.
+      - name: Generate SLSA v1.0 build provenance attestation
+        id: attest
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: meta/SHA256SUMS
+      - name: Verify SLSA build provenance and stage Sigstore bundle
+        if: steps.attest.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
-          DMG: ${{ steps.build.outputs.dmg }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          PUBLISH_MODE: ${{ needs.prepare.outputs.publish_mode }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" \
-            --title "${{ steps.version.outputs.name }} $VERSION" \
+          set -eu
+          while IFS= read -r line; do
+            file="${line#*  }"
+            gh attestation verify "dist/$file" \
+              --bundle "$BUNDLE" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "$GITHUB_REF" \
+              --deny-self-hosted-runners
+          done < meta/SHA256SUMS
+          bundle_name="gvx-desktop-${TAG}.sigstore.json"
+          if [ "$PUBLISH_MODE" = "upload" ]; then
+            bundle_name="gvx-desktop-${TAG}-rebuilt.sigstore.json"
+          fi
+          cp "$BUNDLE" "meta/$bundle_name"
+      - name: Publish GitHub release
+        if: needs.prepare.outputs.publish_mode == 'create'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          APP_NAME: ${{ needs.prepare.outputs.app_name }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -eu
+          set -- dist/* meta/*
+          extra=""
+          if [ "$PRERELEASE" = "true" ]; then
+            extra="--prerelease"
+          fi
+          # shellcheck disable=SC2086
+          gh release create "$TAG" "$@" \
+            --verify-tag \
+            $extra \
+            --title "$APP_NAME $VERSION" \
             --generate-notes \
-            --notes "On an Apple silicon Mac (macOS 13 or later), install with \`brew install --cask ironpark/tap/gvx-desktop\`, or open the disk image and drag the app to Applications. On Windows, unzip the program for your PC: amd64 for Intel and AMD, arm64 for Arm. On Linux, install the .deb or .rpm for your CPU, or unpack the tarball."
+            --notes "On an Apple silicon Mac (macOS 13 or later), install with \`brew install --cask ironpark/tap/gvx-desktop\`, or open the disk image and drag the app to Applications. On Windows, unzip the program for your PC: amd64 for Intel and AMD, arm64 for Arm. On Linux, install the .deb or .rpm for your CPU, or unpack the tarball. Verify downloads with \`SHA256SUMS\` and SLSA build provenance via \`gh attestation verify <file> --repo ironpark/gvx-desktop --bundle gvx-desktop-$TAG.sigstore.json\`."
+      - name: Upload rebuilt artifacts to existing release
+        if: needs.prepare.outputs.publish_mode == 'upload'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -eu
+          # Leave the original full SHA256SUMS intact when only Windows and
+          # Linux packages are rebuilt on an existing tag.
+          rm -f meta/SHA256SUMS meta/BUILD_INFO.txt
+          gh release upload "$TAG" dist/* meta/* --clobber
+
+  # Updates ironpark/homebrew-tap in an isolated job so TAP_GITHUB_TOKEN is
+  # never exposed to build or attestation steps.
+  homebrew:
+    needs: [prepare, build-macos, publish]
+    if: >-
+      needs.prepare.outputs.publish_mode == 'create' &&
+      needs.prepare.outputs.prerelease == 'false'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout immutable commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+          persist-credentials: false
       - name: Update the Homebrew tap
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
-          SHA256: ${{ steps.build.outputs.sha256 }}
-          SIGNING: ${{ steps.build.outputs.signing }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA256: ${{ needs.build-macos.outputs.sha256 }}
+          SIGNING: ${{ needs.build-macos.outputs.signing }}
         run: |
+          set -eu
           if [ -z "$TAP_GITHUB_TOKEN" ]; then
-            echo "::error::TAP_GITHUB_TOKEN is not set; the release is out, the tap is not updated"
+            echo "::error::TAP_GITHUB_TOKEN is not set; the release is published, but the Homebrew tap was not updated"
             exit 1
           fi
-          release/cask.sh "$VERSION" "$SHA256" "$SIGNING" > gvx-desktop.rb
-          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ironpark/homebrew-tap.git" tap
+          ./release/cask.sh "$VERSION" "$SHA256" "$SIGNING" > gvx-desktop.rb
+          auth_header="$(printf 'x-access-token:%s' "$TAP_GITHUB_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth_header" \
+            clone --depth 1 https://github.com/ironpark/homebrew-tap.git tap
           mkdir -p tap/Casks
           cp gvx-desktop.rb tap/Casks/gvx-desktop.rb
           cd tap
@@ -153,127 +566,84 @@ jobs:
           git add Casks/gvx-desktop.rb
           git diff --cached --quiet && { echo "the cask is unchanged"; exit 0; }
           git commit -m "Update gvx-desktop to $VERSION"
-          git push
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth_header" push
 
-  # The Windows programs join the release the Mac job made, or, run by
-  # hand, the one the tag already has.
-  windows:
-    needs: release
-    if: always() && (needs.release.result == 'success' || needs.release.result == 'skipped')
-    runs-on: ubuntu-latest
-    env:
-      TAG: ${{ inputs.tag || github.ref_name }}
-    outputs:
-      amd64: ${{ steps.build.outputs.amd64 }}
-      arm64: ${{ steps.build.outputs.arm64 }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ env.TAG }}
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-      - name: Install the ggui command
-        run: go install github.com/ironpark/ggui/cmd/ggui@latest
-      - name: Build
-        id: build
-        env:
-          CGO_ENABLED: '0'
-        run: |
-          version="${TAG#v}"
-          name="$(sed -n 's/^name = "\(.*\)"$/\1/p' ggui.toml)"
-          for arch in amd64 arm64; do
-            GOARCH="$arch" ggui build --target windows --out "build/$arch" --ldflags "-X main.version=$version"
-            zip="gvx-desktop-$version-windows-$arch.zip"
-            (cd "build/$arch" && zip -q "../../$zip" "$name.exe")
-            sha256sum "$zip" > "$zip.sha256"
-            echo "$arch=$(cut -d' ' -f1 "$zip.sha256")" >> "$GITHUB_OUTPUT"
-          done
-          ls -l ./*.zip
-      - name: Add to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" ./*.zip ./*.zip.sha256 --clobber
-
-  # The Linux packages join the release as the Windows programs do.
-  linux:
-    needs: release
-    if: always() && (needs.release.result == 'success' || needs.release.result == 'skipped')
-    runs-on: ubuntu-latest
-    env:
-      TAG: ${{ inputs.tag || github.ref_name }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ env.TAG }}
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-      - name: Install the ggui command
-        run: go install github.com/ironpark/ggui/cmd/ggui@latest
-      - name: Build
-        run: |
-          version="${TAG#v}"
-          mkdir out
-          for arch in amd64 arm64; do
-            GOARCH="$arch" ggui build --target linux --format tar,deb,rpm --out "build/$arch" --ldflags "-X main.version=$version"
-            cp "build/$arch"/*.tar.gz "build/$arch"/*.deb "build/$arch"/*.rpm out/
-          done
-          cd out
-          for f in *; do sha256sum "$f" > "$f.sha256"; done
-          ls -l
-      - name: Try the Debian package
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y ./out/gvx-desktop_*_amd64.deb
-          test -x /usr/bin/gvx-desktop
-          test -f /usr/share/applications/io.github.ironpark.gvx-desktop.desktop
-          dpkg -s gvx-desktop | grep -E '^(Version|Maintainer|Homepage)'
-      - name: Add to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" out/* --clobber
-
-  # The Chocolatey package names the zips the job before put in the
-  # release, by their checksums. It is installed here from the file, which
-  # downloads and checks them as it will for anyone, before it goes out.
+  # Packages, tests, attests, and optionally pushes the Chocolatey package
+  # when CHOCO_PUBLISH is enabled.
   chocolatey:
-    needs: windows
-    if: always() && needs.windows.result == 'success' && vars.CHOCO_PUBLISH == 'true'
-    runs-on: windows-latest
-    env:
-      TAG: ${{ inputs.tag || github.ref_name }}
+    needs: [prepare, build-windows, publish]
+    if: >-
+      vars.CHOCO_PUBLISH == 'true' &&
+      needs.prepare.outputs.publish_mode != 'dry-run' &&
+      needs.prepare.outputs.prerelease == 'false'
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     defaults:
       run:
         shell: bash
     steps:
-      # The files that make the package are read as the workflow has them,
-      # which a tag released before they were written does not.
-      - uses: actions/checkout@v7
-      - name: Pack
+      # Packaging scripts are read from the workflow ref so rebuilding an older
+      # tag uses the current Chocolatey script.
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pack Chocolatey package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA256_AMD64: ${{ needs.build-windows.outputs.amd64 }}
+          SHA256_ARM64: ${{ needs.build-windows.outputs.arm64 }}
         run: |
-          version="${TAG#v}"
-          release/choco.sh "$version" "${{ needs.windows.outputs.amd64 }}" "${{ needs.windows.outputs.arm64 }}" choco
-          choco pack choco/gvx-desktop.nuspec --outputdirectory .
-          ls -l ./*.nupkg
-      - name: Try it
+          set -eu
+          ./release/choco.sh "$VERSION" "$SHA256_AMD64" "$SHA256_ARM64" choco
+          choco pack choco/gvx-desktop.nuspec --outputdirectory out
+          ls -lh out/
+      - name: Test installing Chocolatey package
+        env:
+          APP_NAME: ${{ needs.prepare.outputs.app_name }}
         run: |
-          choco install gvx-desktop --source . --yes --no-progress
-          exe="$(cygpath "$ChocolateyInstall")/lib/gvx-desktop/tools/$(sed -n 's/^name = "\(.*\)"$/\1/p' ggui.toml).exe"
+          set -eu
+          choco install gvx-desktop --source ./out --yes --no-progress
+          exe="$(cygpath "$ChocolateyInstall")/lib/gvx-desktop/tools/$APP_NAME.exe"
           [ -f "$exe" ] || { echo "::error::the package installed no program at $exe"; exit 1; }
           [ -f "$exe.gui" ] || { echo "::error::the program's shim is not marked as a GUI's"; exit 1; }
           choco uninstall gvx-desktop --yes --no-progress
-      - name: Add to the release
+      - name: Attest Chocolatey package
+        id: attest_choco
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: out/*.nupkg
+      - name: Verify and upload Chocolatey package to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" ./*.nupkg --clobber
+          TAG: ${{ needs.prepare.outputs.tag }}
+          BUNDLE: ${{ steps.attest_choco.outputs.bundle-path }}
+        run: |
+          set -eu
+          for nupkg in out/*.nupkg; do
+            base="$(basename "$nupkg")"
+            gh attestation verify "$nupkg" \
+              --bundle "$BUNDLE" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "$GITHUB_REF" \
+              --deny-self-hosted-runners
+            (cd out && sha256sum -- "$base" > "$base.sha256")
+            cp "$BUNDLE" "out/$base.sigstore.json"
+            gh release upload "$TAG" "$nupkg" "out/$base.sha256" "out/$base.sigstore.json" --clobber
+          done
       - name: Push to chocolatey.org
-        if: github.event_name == 'push'
+        if: needs.prepare.outputs.publish_mode == 'create'
         env:
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
         run: |
+          set -eu
           if [ -z "$CHOCO_API_KEY" ]; then
             echo "::warning::CHOCO_API_KEY is not set; the package is in the release, not on chocolatey.org"
             exit 0
           fi
-          choco push ./*.nupkg --source https://push.chocolatey.org/ --api-key "$CHOCO_API_KEY"
+          choco push out/*.nupkg --source https://push.chocolatey.org/ --api-key "$CHOCO_API_KEY"

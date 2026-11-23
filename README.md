@@ -191,7 +191,30 @@ The gvx Go SDK restricts the process that calls it. To keep the GUI separate, th
 
 ### Release
 
-Update `version` in [ggui.toml](ggui.toml), then push the matching `vX.Y.Z` tag. The [release workflow](.github/workflows/release.yml) publishes the Apple silicon DMG, the Windows amd64 and arm64 ZIPs, and the Linux amd64 and arm64 tarballs and Debian and RPM packages, with their checksums. It generates the [Homebrew cask](https://github.com/ironpark/homebrew-tap) with [release/cask.sh](release/cask.sh).
+Update `version` in [ggui.toml](ggui.toml), then push the matching `vX.Y.Z` tag. The [release workflow](.github/workflows/release.yml) builds with the pinned Go toolchain and `ggui` CLI in [release/toolchain.env](release/toolchain.env) via [release/repro-build.sh](release/repro-build.sh), verifies bit-for-bit reproducibility in CI, signs SLSA v1.0 build provenance with Sigstore (`actions/attest`), and publishes the Apple silicon DMG, Windows amd64 and arm64 ZIPs, Linux amd64 and arm64 tarballs and Debian and RPM packages, checksums (`SHA256SUMS` and per-file `.sha256`), `BUILD_INFO.txt`, and the offline `.sigstore.json` provenance bundle. For stable tags, it also updates the [Homebrew cask](https://github.com/ironpark/homebrew-tap) with [release/cask.sh](release/cask.sh).
+
+Verify a downloaded release file against its SLSA build provenance with the GitHub CLI:
+
+```sh
+gh attestation verify gvx-desktop-0.7.0-windows-amd64.zip \
+  --repo ironpark/gvx-desktop \
+  --signer-workflow ironpark/gvx-desktop/.github/workflows/release.yml \
+  --deny-self-hosted-runners
+```
+
+To reproduce the release packages locally from a tagged checkout, or build a standalone binary directly from `proxy.golang.org`:
+
+```sh
+./release/repro-build.sh install-ggui
+./release/repro-build.sh package windows amd64 0.7.0 ./out
+./release/repro-build.sh package linux amd64 0.7.0 ./out
+
+GO111MODULE=on GOPROXY=https://proxy.golang.org/ GOSUMDB=sum.golang.org \
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v1 GOTOOLCHAIN=go1.27.4 \
+  go install -trimpath -pgo=off -compiler=gc \
+  -ldflags='-buildid= -s -w -X main.version=0.7.0 -X github.com/ironpark/ggui.buildID=io.github.ironpark.gvx-desktop' \
+  -- github.com/ironpark/gvx-desktop@v0.7.0
+```
 
 Set the repository variable `CHOCO_PUBLISH` to `true` to enable Chocolatey packaging with [release/choco.sh](release/choco.sh). The workflow header lists the relevant secrets. To regenerate the PNG assets for the app icon and sidebar mark, use [assets/svg2png.swift](assets/svg2png.swift).
 

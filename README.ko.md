@@ -191,7 +191,30 @@ gvx의 Go SDK는 자신을 호출한 프로세스의 동작을 제한합니다. 
 
 ### 릴리스
 
-[ggui.toml](ggui.toml)의 `version`을 바꾸고 해당 버전의 `vX.Y.Z` 태그를 푸시합니다. [릴리스 워크플로](.github/workflows/release.yml)는 Apple Silicon용 DMG, Windows amd64·arm64용 ZIP, Linux amd64·arm64용 tarball과 Debian·RPM 패키지를 체크섬과 함께 게시합니다. [release/cask.sh](release/cask.sh)로 [Homebrew cask](https://github.com/ironpark/homebrew-tap)도 갱신합니다.
+[ggui.toml](ggui.toml)의 `version`을 바꾸고 해당 버전의 `vX.Y.Z` 태그를 푸시합니다. [릴리스 워크플로](.github/workflows/release.yml)는 [release/toolchain.env](release/toolchain.env)에 고정된 Go 툴체인과 `ggui` CLI를 [release/repro-build.sh](release/repro-build.sh)로 실행해 빌드하고, CI에서 비트 단위 재현성을 확인한 뒤 Sigstore(`actions/attest`)로 SLSA v1.0 빌드 프로비넌스에 서명합니다. 이후 Apple Silicon용 DMG, Windows amd64·arm64용 ZIP, Linux amd64·arm64용 tarball과 Debian·RPM 패키지, 체크섬(`SHA256SUMS` 및 파일별 `.sha256`), `BUILD_INFO.txt`, 오프라인 검증용 `.sigstore.json` 번들을 한 번에 게시합니다. 정식 태그에서는 [release/cask.sh](release/cask.sh)로 [Homebrew cask](https://github.com/ironpark/homebrew-tap)도 갱신합니다.
+
+다운로드한 릴리스 파일의 SLSA 빌드 프로비넌스는 GitHub CLI로 검증할 수 있습니다.
+
+```sh
+gh attestation verify gvx-desktop-0.7.0-windows-amd64.zip \
+  --repo ironpark/gvx-desktop \
+  --signer-workflow ironpark/gvx-desktop/.github/workflows/release.yml \
+  --deny-self-hosted-runners
+```
+
+태그 체크아웃에서 릴리스 패키지를 로컬로 재현하거나 `proxy.golang.org`에서 독립 실행 파일을 바로 빌드하려면 아래 명령을 사용합니다.
+
+```sh
+./release/repro-build.sh install-ggui
+./release/repro-build.sh package windows amd64 0.7.0 ./out
+./release/repro-build.sh package linux amd64 0.7.0 ./out
+
+GO111MODULE=on GOPROXY=https://proxy.golang.org/ GOSUMDB=sum.golang.org \
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v1 GOTOOLCHAIN=go1.27.4 \
+  go install -trimpath -pgo=off -compiler=gc \
+  -ldflags='-buildid= -s -w -X main.version=0.7.0 -X github.com/ironpark/ggui.buildID=io.github.ironpark.gvx-desktop' \
+  -- github.com/ironpark/gvx-desktop@v0.7.0
+```
 
 저장소 변수 `CHOCO_PUBLISH`를 `true`로 설정하면 [release/choco.sh](release/choco.sh)를 사용하는 Chocolatey 패키징이 활성화됩니다. 관련 시크릿은 워크플로 파일 상단에 설명되어 있습니다. 앱 아이콘과 사이드바 마크의 PNG가 필요하면 [assets/svg2png.swift](assets/svg2png.swift)로 다시 생성합니다.
 
