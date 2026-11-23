@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -12,8 +13,6 @@ import (
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
-
-const ptySupported = true
 
 type term struct {
 	ptmx *os.File
@@ -76,6 +75,13 @@ func openExecPTY(cmd *exec.Cmd, rows, cols uint16) (t *term, closeSlave func(), 
 	attr.Setctty = true
 	return t, func() { _ = tty.Close() }, nil
 }
+
+// startCmd starts cmd, made with exec.CommandContext(ctx), on the terminal
+// openPTY or openExecPTY gave it, if any; waitCmd waits for it. On Unix
+// they are cmd's own.
+func startCmd(_ context.Context, cmd *exec.Cmd, _ *term) error { return cmd.Start() }
+
+func waitCmd(cmd *exec.Cmd, _ *term) error { return cmd.Wait() }
 
 func (t *term) writer() io.Writer { return t.ptmx }
 

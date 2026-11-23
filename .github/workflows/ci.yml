@@ -104,3 +104,16 @@ jobs:
         run: |
           Get-Content -Raw install.ps1 | Invoke-Expression
           if (-not (Test-Path "$env:LOCALAPPDATA\Programs\GVX Desktop\GVX Desktop.exe")) { throw 'no program was installed' }
+
+  # A sandbox or docker exec with a terminal runs rungv on a pseudoconsole
+  # of the supervisor's own on Windows (internal/sandbox/pty_windows.go),
+  # which only a Windows host can try.
+  pseudoconsole:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -run 'TestPseudoconsole' -v ./internal/sandbox/

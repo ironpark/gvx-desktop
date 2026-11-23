@@ -170,8 +170,9 @@ the moment). Methods are thin wrappers of §3, except:
     early is echoed or cooked. stderr stays a pipe: only rungv's own messages come there; they go
     into Wait's error. `Resize` = `TIOCSWINSZ` on the master → SIGWINCH → rungv sends
     `exec.resize`. Stdin = the master; `Close` writes EOT. EIO on the master = EOF.
-  - **TTY on Windows**: pipes (creack/pty has no ConPTY), `-t` still passed (the guest gets a
-    24x80 terminal); `Resize` returns an error. (The UI's terminal does not use this path: §6.1.)
+  - **TTY on Windows**: a pseudoconsole of the supervisor's (`pty_windows.go`), sized before
+    start; `Resize` resizes it, and rungv follows the console's size. (The UI's terminal does
+    not use this path: §6.1.)
   - **No TTY**: pipes. `Stdin()` nil without Interactive. Stdout and Stderr apart; Stderr also
     carries rungv's own last line on failure.
   - **Wait**: `(code, nil)` when rungv exited after the command started and the last stderr line
@@ -438,7 +439,7 @@ reads the engine's stats (§5.5).
 With features Control, the two notes become `Works: docker run (-d, -i, -t, --rm), exec, cp,
 pause, top, update, stats, build (BuildKit and Compose), ps, logs, stop, start, rm, ports on
 127.0.0.1, volumes, bind mounts, pull/images, networks between containers, and Compose with
-several services.` and `Not yet supported: commit, export, diff, and Windows terminals.` Without:
+several services.` and `Not yet supported: commit, export and diff.` Without:
 today's two notes plus `Update rungv to v0.20 or later for exec, cp, pause, top and update.`
 
 ### 6.7 New UI strings (exact English keys; all six catalogs)
@@ -464,7 +465,7 @@ Applied to %s
 The running sandbox has the new memory, CPU and LAN settings.
 Could not change the running sandbox
 Works: docker run (-d, -i, -t, --rm), exec, cp, pause, top, update, stats, build (BuildKit and Compose), ps, logs, stop, start, rm, ports on 127.0.0.1, volumes, bind mounts, pull/images, networks between containers, and Compose with several services.
-Not yet supported: commit, export, diff, and Windows terminals.
+Not yet supported: commit, export and diff.
 Update rungv to v0.20 or later for exec, cp, pause, top and update.
 ```
 

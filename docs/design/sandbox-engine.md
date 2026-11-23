@@ -24,7 +24,7 @@ also supports `exec`, `cp` (archive), `pause`/`unpause`, `top`, `update`, guest
 `stats`, and live `network connect`/`disconnect` for containers on the overlay.
 With `rungv` v0.19, those endpoints answer 501 as before. Still not supported:
 `commit`, `export`, `diff` (`/changes`), WebSocket attach, swarm and plugins
-(all answer 501), and a TTY on Windows (falls back to pipes with a warning).
+(all answer 501).
 Image builds are supported through the engine's lazy BuildKit builder sandbox
 (§9.1). Containers on a user network reach each other by name through the
 overlay (§9.2).
@@ -68,7 +68,8 @@ Checked with `~/.gvx/bin/rungv <cmd> -h` and real runs in a temporary `-cache-di
 - `tag SRC DST`, `save [-o FILE] IMAGE...` (only images that came from a
   registry), `load [-i FILE] [-q]` (reads stdin), `pull [-platform]`, `rmi [-f]`,
   `image prune [-a] -f`, and `system df --format json` all exist.
-- creack/pty v1.1.24 has no Windows support.
+- creack/pty v1.1.24 has no Windows support: on Windows a TTY is a pseudoconsole (ConPTY) of the
+  supervisor's own, `pty_windows.go`.
 
 ## 3. Package layout
 
@@ -342,8 +343,11 @@ States, events and port parsing. The `supervisor_test.go` tests keep passing unc
   guest. stderr stays a pipe. The master is read as Stdout output. `Stdin` writes to the
   master. `CloseStdin` writes `0x04` (EOT). `Resize` → `pty.Setsize`. Close the slave in
   the parent after Start. Treat EIO from the master as EOF. On Windows
-  (`pty_windows.go`), a TTY spec runs with pipes as if Interactive, and
-  `Resize` returns an error. The engine adds a create Warning on Windows.
+  (`pty_windows.go`), rungv runs on a pseudoconsole instead: stdin and stdout are the
+  console's, stderr stays the caller's pipe, `Resize` is `ResizePseudoConsole`, and the
+  console is closed when rungv exits, which ends its output. exec.Cmd cannot start a
+  process on a pseudoconsole, so `startCmd`/`waitCmd` do it (CreateProcess with
+  `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` and a handle list of stderr alone).
   Initial size: B calls `runner.Resize` right after Start when
   `HostConfig.ConsoleSize` is set. The CLI also resizes after start.
 - Output: `pump` reads **raw chunks**, not lines. Each chunk goes (a) to
@@ -662,7 +666,7 @@ no names on Docker either.
   without a Docker Engine" plus an honest description. What works: run (-d, -i, -t,
   --rm), ps, logs, stop/start/rm, ports on 127.0.0.1, volumes, bind mounts,
   pull/images, networks between containers, and Compose with several services. What
-  doesn't: exec, cp, and Windows terminals. When a Docker Engine sandbox is running, a note says it
+  doesn't: exec and cp (both work with rungv v0.20). When a Docker Engine sandbox is running, a note says it
   keeps running but docker no longer reaches it.
 - **i18n**: every new string through `tr`/`trn` with English keys, translated in all six
   catalogs `internal/ui/i18n_{ko,ja,zh_hans,zh_hant,de,hi}.go`. `TestCatalogsAreComplete`
@@ -895,7 +899,8 @@ beyond `engine.New/Config/Open/Close/Handler/NewRunner/RunningCount/StopRunning/
    endpoint**, not an in-memory listener: one line in `dockerBackendHost()`.
 6. Container logs are kept in `logs/<id>.log` (json-file format, capped), so `docker
    logs` survives an app restart.
-7. On Windows, `-t` runs without a terminal, with a warning (no ConPTY in creack/pty).
+7. On Windows, `-t` runs on a pseudoconsole (ConPTY) of the supervisor's own; creack/pty has
+   none.
 8. Builds run through the engine-owned lazy BuildKit sandbox (`moby/buildkit:v0.34.2`)
    exposed via the `gvx-desktop` buildx remote builder (`default-load=true`) for
    `docker build` / `docker buildx build` / `docker compose build`, and via a

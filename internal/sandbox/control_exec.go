@@ -44,7 +44,7 @@ func (c *runControl) Exec(ctx context.Context, o ExecOptions) (ExecProcess, erro
 		waitDone:  make(chan struct{}),
 	}
 
-	usePTY := o.TTY && ptySupported
+	usePTY := o.TTY
 	var (
 		closeAfterStart []func()
 		closeOnFail     []func()
@@ -115,7 +115,7 @@ func (c *runControl) Exec(ctx context.Context, o ExecOptions) (ExecProcess, erro
 		ep.stderr = ep.stderrTap
 	}
 
-	if err := cmd.Start(); err != nil {
+	if err := startCmd(ctx, cmd, ep.ptyTerm); err != nil {
 		cleanupFail()
 		return nil, err
 	}
@@ -226,7 +226,7 @@ func readPIDFile(path string) int {
 }
 
 func (e *execProcess) waitLoop() {
-	err := e.cmd.Wait()
+	err := waitCmd(e.cmd, e.ptyTerm)
 
 	// Fast commands can exit before the 20 ms poll tick; read the PID file
 	// once more before removing it.
@@ -294,7 +294,7 @@ func (e *execProcess) Resize(rows, cols uint16) error {
 		return errNoTerminal
 	}
 	if e.ptyTerm == nil {
-		return errors.New("terminal resize is not supported on Windows")
+		return errNoTerminal
 	}
 	if e.ptyClosed {
 		return os.ErrClosed

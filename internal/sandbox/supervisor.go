@@ -448,13 +448,6 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 		// reaches this computer through the ports it publishes.
 		spec = WithAutoPublish(spec, false)
 	}
-	usePTY := spec.TTY && ptySupported
-	launchSpec := spec
-	if spec.TTY && !ptySupported {
-		// On Windows creack/pty is unavailable; fall back to pipes.
-		launchSpec = spec.Clone()
-		launchSpec.TTY = false
-	}
 	var args []string
 	if restoreDir != "" {
 		// The resumed sandbox keeps the bundle directory it was restored
@@ -463,17 +456,20 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 			_ = os.Remove(paths.CheckpointDir)
 			paths.CheckpointDir = restoreDir
 		}
-		args = launchSpec.RestoreArgs(restoreDir, paths)
+		args = spec.RestoreArgs(restoreDir, paths)
 	} else {
-		args = launchSpec.RunArgs(paths)
+		args = spec.RunArgs(paths)
 	}
 
 	cmd := client.Command(context.Background(), args...)
 	cmd.Env = os.Environ()
-	stderr, err := cmd.StderrPipe()
+	// A pipe of its own rather than StderrPipe: on Windows a run with a
+	// terminal is started without exec.Cmd.Start (startCmd).
+	stderr, stderrW, err := os.Pipe()
 	if err != nil {
 		return err
 	}
+	cmd.Stderr = stderrW
 	var (
 		stdout          io.Reader
 		stdinW          *os.File
@@ -481,7 +477,7 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 		closeAfterStart func()
 		closeOnFail     func()
 	)
-	if usePTY {
+	if spec.TTY {
 		var closeSlave func()
 		ptyTerm, stdout, closeSlave, err = openPTY(cmd)
 		if err != nil {
@@ -521,12 +517,15 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 	logs.Add(System, fmt.Sprintf("── %s %s · %s", what, spec.Name, time.Now().Format("2006-01-02 15:04:05")))
 	logs.Add(System, "$ rungv "+rungv.FormatArgs(redactArgs(args)))
 
-	if err := cmd.Start(); err != nil {
+	if err := startCmd(context.Background(), cmd, ptyTerm); err != nil {
 		closeOnFail()
+		_ = stderr.Close()
+		_ = stderrW.Close()
 		logs.Add(System, "failed to start: "+err.Error())
 		return err
 	}
 	closeAfterStart()
+	_ = stderrW.Close()
 
 	p := &proc{
 		cmd:         cmd,
@@ -564,7 +563,8 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 	go s.pump(spec.ID, p, stderr, Stderr, &wg)
 	go func() {
 		wg.Wait()
-		err := cmd.Wait()
+		_ = stderr.Close()
+		err := waitCmd(cmd, ptyTerm)
 		p.closeStdio()
 		s.exited(spec.ID, p, err)
 	}()

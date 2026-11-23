@@ -506,7 +506,7 @@ func sandboxEngineSettings(m *Model) ggui.Widget {
 				).Gap(8).Align(widget.AlignStart),
 				widget.Row(
 					widget.Padding(glyph(lucide.CircleMinus, 13).Color(colorGray), 2, 0, 0, 0),
-					widget.Expanded(ui.Caption(tr("Not yet supported: commit, export, diff, and Windows terminals.")).Size(12)),
+					widget.Expanded(ui.Caption(tr("Not yet supported: commit, export and diff.")).Size(12)),
 				).Gap(8).Align(widget.AlignStart),
 			)
 		} else {
@@ -517,7 +517,7 @@ func sandboxEngineSettings(m *Model) ggui.Widget {
 				).Gap(8).Align(widget.AlignStart),
 				widget.Row(
 					widget.Padding(glyph(lucide.CircleMinus, 13).Color(colorGray), 2, 0, 0, 0),
-					widget.Expanded(ui.Caption(tr("Not yet supported: exec, cp, and Windows terminals.")).Size(12)),
+					widget.Expanded(ui.Caption(tr("Not yet supported: exec and cp.")).Size(12)),
 				).Gap(8).Align(widget.AlignStart),
 				widget.Row(
 					widget.Padding(glyph(lucide.Info, 13).Color(colorAmber), 2, 0, 0, 0),

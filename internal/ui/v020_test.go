@@ -695,7 +695,7 @@ func TestV020UIScreensAndGating(t *testing.T) {
 	// 3. Settings -> Docker -> Experimental notes for v0.20 vs v0.19.
 	m.Go(PageSettings)
 	p.Frame()
-	if !shows("Not yet supported: commit, export, diff, and Windows terminals.") {
+	if !shows("Not yet supported: commit, export and diff.") {
 		t.Errorf("Settings v0.20 notes missing:\n%s", p.Semantics())
 	}
 	m.RungvFeatures.Set(rungv.Features{})

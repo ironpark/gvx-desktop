@@ -13,7 +13,6 @@ import (
 	"net"
 	"os"
 	"path"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -125,10 +124,6 @@ func mergeContainerConfig(id string, req *containerCreateRequest, img ImageInspe
 		if json.Unmarshal(trimmed, &hc) == nil && len(hc.Test) > 0 && hc.Test[0] != "NONE" {
 			warnings = append(warnings, "Healthcheck is ignored by GVX Desktop's experimental sandbox engine")
 		}
-	}
-
-	if req.Tty && runtime.GOOS == "windows" {
-		warnings = append(warnings, "TTY is not supported on Windows; running without a terminal")
 	}
 
 	cfg := ContainerConfig{

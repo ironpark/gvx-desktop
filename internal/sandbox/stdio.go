@@ -83,9 +83,6 @@ func (s *Supervisor) Resize(id string, rows, cols uint16) error {
 		return errNotRunning
 	}
 	if p.term == nil {
-		if !ptySupported && p.spec.TTY {
-			return errors.New("terminal resize is not supported on Windows")
-		}
 		return errNoTerminal
 	}
 	return p.term.resize(rows, cols)
