@@ -7,10 +7,13 @@
 #   release/repro-build.sh package TARGET ARCH VERSION OUTDIR [GGUI_FLAGS...]
 #   release/repro-build.sh verify-binary BINARY GOOS GOARCH
 #
-# Reads pinned toolchain settings from release/toolchain.env, scrubs ambient
-# environment variables, disables cgo for application builds, strips paths
-# and build IDs, and normalizes archive timestamps to SOURCE_DATE_EPOCH.
+# Reads pinned toolchain settings from release/toolchain.env, normalizes umask,
+# scrubs ambient environment variables, disables cgo for application builds,
+# strips paths and build IDs, and packs Windows zips and Linux tarballs with
+# release/repro-pack.go using SOURCE_DATE_EPOCH so archives match bit for bit
+# across Linux and macOS hosts.
 set -eu
+umask 022
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 # shellcheck source=release/toolchain.env
@@ -28,13 +31,24 @@ home_dir=${HOME:-/tmp}
 tmp_dir=${TMPDIR:-/tmp}
 
 field() {
-	sed -n "s/^$1 = \"\\(.*\\)\"\$/\\1/p" "$repo_root/ggui.toml"
+	awk -v key="$1" '
+		/^\[app\][[:space:]]*$/ { in_app = 1; next }
+		/^\[/ { in_app = 0 }
+		in_app && index($0, key " = \"") == 1 {
+			sub(/^[^"]*"/, "")
+			sub(/"[[:space:]]*$/, "")
+			print
+			exit
+		}
+	' "$repo_root/ggui.toml"
 }
 
 app_name=$(field name)
 app_id=$(field id)
-[ -n "$app_name" ] || { echo "repro-build: ggui.toml has no app name" >&2; exit 1; }
-[ -n "$app_id" ] || { echo "repro-build: ggui.toml has no app id" >&2; exit 1; }
+app_version=$(field version)
+[ -n "$app_name" ] || { echo "repro-build: ggui.toml has no [app] name" >&2; exit 1; }
+[ -n "$app_id" ] || { echo "repro-build: ggui.toml has no [app] id" >&2; exit 1; }
+[ -n "$app_version" ] || { echo "repro-build: ggui.toml has no [app] version" >&2; exit 1; }
 
 resolve_epoch() {
 	if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
@@ -44,53 +58,31 @@ resolve_epoch() {
 	git -C "$repo_root" log -1 --format=%ct
 }
 
-set_mtime() {
-	epoch=$1
-	target=$2
-	if touch -d "@$epoch" "$target" 2>/dev/null; then
-		return
-	fi
-	stamp=$(TZ=UTC date -r "$epoch" +%Y%m%d%H%M.%S)
-	touch -t "$stamp" "$target"
-}
-
-set_tree_mtime() {
-	epoch=$1
-	root=$2
-	find "$root" | while IFS= read -r item; do
-		set_mtime "$epoch" "$item"
-	done
-}
-
-pack_linux_tar() {
-	tree=$1
-	out=$2
-	epoch=$3
-	tar_cmd=tar
-	if ! tar --version 2>/dev/null | grep -qi 'GNU tar'; then
-		if command -v gtar >/dev/null 2>&1; then
-			tar_cmd=gtar
-		fi
-	fi
-	rm -f "$out"
-	if "$tar_cmd" --version 2>/dev/null | grep -qi 'GNU tar'; then
-		"$tar_cmd" \
-			--sort=name \
-			--mtime="@$epoch" \
-			--owner=0 \
-			--group=0 \
-			--numeric-owner \
-			--format=ustar \
-			-C "$tree" \
-			-cf - usr | gzip -9n > "$out"
-	else
-		set_tree_mtime "$epoch" "$tree/usr"
-		(
-			cd "$tree"
-			LC_ALL=C find usr | LC_ALL=C sort | \
-				tar -n --uid 0 --gid 0 --uname root --gname root --format ustar -T - -cf -
-		) | gzip -9n > "$out"
-	fi
+run_repro_pack() {
+	env -i \
+		PATH="$gobin_dir:/usr/local/bin:/usr/bin:/bin" \
+		HOME="$home_dir" \
+		TMPDIR="$tmp_dir" \
+		LC_ALL=C \
+		TZ=UTC \
+		GOMODCACHE="$gomodcache" \
+		GOCACHE="$gocache" \
+		GOENV=off \
+		GOWORK=off \
+		GO111MODULE=on \
+		GOPROXY="$goproxy" \
+		GOSUMDB="$gosumdb" \
+		GOTOOLCHAIN="$toolchain" \
+		GOTELEMETRY=off \
+		GOFIPS140=off \
+		GOEXPERIMENT= \
+		GODEBUG= \
+		GOFLAGS= \
+		CGO_ENABLED=0 \
+		${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+		${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+		${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
+		"$go_bin" run "$repo_root/release/repro-pack.go" "$@"
 }
 
 cmd=${1:?usage: repro-build.sh <install-ggui|binary|package|verify-binary> ...}
@@ -123,11 +115,14 @@ install-ggui)
 		GODEBUG= \
 		GOFLAGS= \
 		CGO_ENABLED="$ggui_cgo" \
+		${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+		${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+		${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
 		"$go_bin" install \
 			-trimpath \
 			-pgo=off \
 			-compiler=gc \
-			-ldflags="-buildid= -s -w" \
+			-ldflags="-s -w -buildid=" \
 			-- "github.com/ironpark/ggui/cmd/ggui@$GGUI_VERSION"
 	;;
 
@@ -166,6 +161,9 @@ binary)
 		GOARCH="$goarch" \
 		GOAMD64="$GOAMD64" \
 		GOARM64="$GOARM64" \
+		${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+		${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+		${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
 		"$go_bin" build \
 			-C "$repo_root" \
 			-mod=readonly \
@@ -185,8 +183,30 @@ package)
 	version=${3:?usage: repro-build.sh package TARGET ARCH VERSION OUTDIR [GGUI_FLAGS...]}
 	outdir=${4:?usage: repro-build.sh package TARGET ARCH VERSION OUTDIR [GGUI_FLAGS...]}
 	shift 4
-	ggui_bin=${GGUI:-$(command -v ggui 2>/dev/null || printf '%s/bin/ggui' "$("$go_bin" env GOPATH)")}
-	[ -x "$ggui_bin" ] || { echo "repro-build: ggui not found at $ggui_bin; run install-ggui first" >&2; exit 1; }
+
+	if [ "$version" != "$app_version" ]; then
+		echo "repro-build: version argument $version does not match ggui.toml ($app_version)" >&2
+		exit 1
+	fi
+
+	if [ -n "${GGUI:-}" ]; then
+		ggui_bin=$GGUI
+	elif [ -x "$("$go_bin" env GOPATH)/bin/ggui" ]; then
+		ggui_bin="$("$go_bin" env GOPATH)/bin/ggui"
+	else
+		ggui_bin=$(command -v ggui 2>/dev/null || true)
+	fi
+	[ -n "$ggui_bin" ] && [ -x "$ggui_bin" ] || {
+		echo "repro-build: ggui not found; run ./release/repro-build.sh install-ggui first" >&2
+		exit 1
+	}
+
+	ggui_meta=$(GOTOOLCHAIN="$toolchain" "$go_bin" version -m "$ggui_bin")
+	if ! printf '%s\n' "$ggui_meta" | grep -Eq "^[[:space:]]+mod[[:space:]]+github\.com/ironpark/ggui/cmd/ggui[[:space:]]+$GGUI_VERSION([[:space:]]|\$)"; then
+		echo "repro-build: $ggui_bin does not match pinned ggui $GGUI_VERSION; run ./release/repro-build.sh install-ggui" >&2
+		exit 1
+	fi
+
 	ggui_dir=$(dirname -- "$ggui_bin")
 	epoch=$(resolve_epoch)
 	mkdir -p -- "$outdir"
@@ -217,6 +237,9 @@ package)
 			GOARCH="$arch" \
 			GOAMD64="$GOAMD64" \
 			GOARM64="$GOARM64" \
+			${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+			${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+			${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
 			${GGUI_P12_BASE64:+GGUI_P12_BASE64="$GGUI_P12_BASE64"} \
 			${GGUI_P12_PASSWORD:+GGUI_P12_PASSWORD="$GGUI_P12_PASSWORD"} \
 			${GGUI_NOTARY_PASSWORD:+GGUI_NOTARY_PASSWORD="$GGUI_NOTARY_PASSWORD"} \
@@ -242,13 +265,9 @@ package)
 			run_ggui build --target windows --out "$outdir_abs" --ldflags "-buildid= -X main.version=$version" "$@"
 		)
 		exe="$outdir_abs/$app_name.exe"
-		set_mtime "$epoch" "$exe"
-		zip="gvx-desktop-$version-windows-$arch.zip"
-		rm -f "$outdir_abs/$zip"
-		(
-			cd "$outdir_abs"
-			TZ=UTC zip -q -X "$zip" "$app_name.exe"
-		)
+		zip="$outdir_abs/gvx-desktop-$version-windows-$arch.zip"
+		rm -f "$zip"
+		run_repro_pack zip "$epoch" "$zip" "$exe"
 		;;
 	linux)
 		(
@@ -257,7 +276,8 @@ package)
 		)
 		tree="$outdir_abs/gvx-desktop-linux-$arch"
 		tarball="$outdir_abs/gvx-desktop-$version-linux-$arch.tar.gz"
-		pack_linux_tar "$tree" "$tarball" "$epoch"
+		rm -f "$tarball"
+		run_repro_pack tar "$epoch" "$tarball" "$tree"
 		;;
 	*)
 		echo "repro-build: unknown target '$target' (expected macos, windows, or linux)" >&2
@@ -291,7 +311,7 @@ verify-binary)
 	if printf '%s\n' "$meta" | grep -Eq '^[[:space:]]+build[[:space:]]+vcs\.'; then
 		fail "unexpected VCS metadata embedded in binary"
 	fi
-	bid=$(GOTOOLCHAIN="$toolchain" "$go_bin" tool buildid "$bin" 2>/dev/null || true)
+	bid=$(GOTOOLCHAIN="$toolchain" "$go_bin" tool buildid "$bin")
 	if [ -n "$bid" ]; then
 		fail "expected empty Go build ID (-buildid=), got '$bid'"
 	fi
