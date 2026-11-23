@@ -85,9 +85,12 @@ func (c *Client) checkTarget(t Target) error {
 	return nil
 }
 
+// targetArgs starts the arguments of a runtime command: its words, as
+// "port ls" (a command group takes its subcommand before any flag), then
+// the flags that name the sandbox.
 func targetArgs(cmd string, t Target) []string {
 	args := make([]string, 0, 8)
-	args = append(args, cmd)
+	args = append(args, strings.Fields(cmd)...)
 	if t.Socket != "" {
 		args = append(args, "-S", t.Socket)
 	}
@@ -559,7 +562,7 @@ func (c *Client) Ports(ctx context.Context, t Target) ([]PortRule, error) {
 	if err := c.checkTarget(t); err != nil {
 		return nil, err
 	}
-	out, err := c.output(ctx, append(targetArgs("port", t), "ls", "-f", "json")...)
+	out, err := c.output(ctx, append(targetArgs("port ls", t), "-f", "json")...)
 	if err != nil {
 		return nil, err
 	}

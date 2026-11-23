@@ -328,6 +328,15 @@ case "$cmd" in
   export)
     cat "` + fileTar + `"
     ;;
+  port)
+    # rungv port dispatches on its subcommand before it parses any flag.
+    if [ "$1" != ls ]; then
+      echo "rungv port: unknown subcommand \"$1\" (want ls, add, or rm)" >&2
+      exit 2
+    fi
+    echo '{"proto":"tcp","host_ip":"127.0.0.1","host_port":18093,"guest_ip":"10.0.2.15","guest_port":8080,"source":"dynamic"}'
+    echo '{"proto":"tcp","host_socket":"/tmp/d.sock","guest_ip":"10.0.2.15","guest_port":2375,"source":"static"}'
+    ;;
   *)
     echo "unexpected cmd $cmd" >&2
     exit 2
@@ -383,6 +392,10 @@ esac
 	res, err := c.Update(ctx, target, Update{Memory: "256m", CPUs: "1.5", PidsLimit: &pids, IsolateLAN: &iso})
 	if err != nil || res.MemoryBytes != 268435456 || !res.IsolateLAN {
 		t.Fatalf("Update: %+v %v", res, err)
+	}
+	ports, err := c.Ports(ctx, target)
+	if err != nil || len(ports) != 2 || ports[0].HostPort != 18093 || ports[0].Source != "dynamic" || ports[1].HostSocket != "/tmp/d.sock" {
+		t.Fatalf("Ports: %+v %v", ports, err)
 	}
 	var evs []Event
 	if err := c.Events(ctx, target, func(e Event) { evs = append(evs, e) }); err != nil || len(evs) != 2 || evs[0].Action != "pause" {

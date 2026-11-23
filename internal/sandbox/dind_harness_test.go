@@ -174,6 +174,15 @@ func TestDockerEngineHarness(t *testing.T) {
 		return pub && slices.ContainsFunc(st.Busy, func(p PublishedPort) bool { return p.Host == "127.0.0.1:15696" })
 	})
 	t.Logf("ports %+v busy %v", sup.State(spec.ID).Ports, sup.State(spec.ID).Busy)
+	// rungv port ls answers (issue #3: -S before ls failed), and the state
+	// is what it lists.
+	rules, err := client.Ports(context.Background(), ctl.Target())
+	if err != nil {
+		t.Fatalf("rungv port ls: %v", err)
+	}
+	waitFor(t, "ports synced from port ls", 5*time.Second, func() bool {
+		return slices.Equal(sup.State(spec.ID).Ports, portsFromRules(rules))
+	})
 	evMu.Lock()
 	sawBusy := slices.ContainsFunc(events, func(e Event) bool { return e.Kind == EventPortBusy && e.Port == "127.0.0.1:15696" })
 	evMu.Unlock()
