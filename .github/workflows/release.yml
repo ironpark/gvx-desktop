@@ -74,8 +74,11 @@ jobs:
       ggui_version: ${{ steps.meta.outputs.ggui_version }}
       goproxy: ${{ steps.meta.outputs.goproxy }}
       gosumdb: ${{ steps.meta.outputs.gosumdb }}
-      goamd64: ${{ steps.meta.outputs.goamd64 }}
-      goarm64: ${{ steps.meta.outputs.goarm64 }}
+      goamd64_linux: ${{ steps.meta.outputs.goamd64_linux }}
+      goamd64_windows: ${{ steps.meta.outputs.goamd64_windows }}
+      goarm64_darwin: ${{ steps.meta.outputs.goarm64_darwin }}
+      goarm64_windows: ${{ steps.meta.outputs.goarm64_windows }}
+      goarm64_linux: ${{ steps.meta.outputs.goarm64_linux }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -176,8 +179,11 @@ jobs:
             echo "ggui_version=$GGUI_VERSION"
             echo "goproxy=$GOPROXY"
             echo "gosumdb=$GOSUMDB"
-            echo "goamd64=$GOAMD64"
-            echo "goarm64=$GOARM64"
+            echo "goamd64_linux=$GOAMD64_LINUX"
+            echo "goamd64_windows=$GOAMD64_WINDOWS"
+            echo "goarm64_darwin=$GOARM64_DARWIN"
+            echo "goarm64_windows=$GOARM64_WINDOWS"
+            echo "goarm64_linux=$GOARM64_LINUX"
           } >> "$GITHUB_OUTPUT"
 
           echo "commit_sha=$commit_sha checkout_ref=$checkout_ref"
@@ -488,8 +494,11 @@ jobs:
           GGUI_VERSION: ${{ needs.prepare.outputs.ggui_version }}
           GOPROXY: ${{ needs.prepare.outputs.goproxy }}
           GOSUMDB: ${{ needs.prepare.outputs.gosumdb }}
-          GOAMD64: ${{ needs.prepare.outputs.goamd64 }}
-          GOARM64: ${{ needs.prepare.outputs.goarm64 }}
+          GOAMD64_LINUX: ${{ needs.prepare.outputs.goamd64_linux }}
+          GOAMD64_WINDOWS: ${{ needs.prepare.outputs.goamd64_windows }}
+          GOARM64_DARWIN: ${{ needs.prepare.outputs.goarm64_darwin }}
+          GOARM64_WINDOWS: ${{ needs.prepare.outputs.goarm64_windows }}
+          GOARM64_LINUX: ${{ needs.prepare.outputs.goarm64_linux }}
           REPOSITORY: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -518,8 +527,11 @@ jobs:
           ggui_version=$GGUI_VERSION
           goproxy=$GOPROXY
           gosumdb=$GOSUMDB
-          goamd64=$GOAMD64
-          goarm64=$GOARM64
+          goamd64_linux=$GOAMD64_LINUX
+          goamd64_windows=$GOAMD64_WINDOWS
+          goarm64_darwin=$GOARM64_DARWIN
+          goarm64_windows=$GOARM64_WINDOWS
+          goarm64_linux=$GOARM64_LINUX
           workflow_run=$RUN_URL
 
           # Reproduce release packages from commit $COMMIT_SHA:
@@ -527,8 +539,8 @@ jobs:
           SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH ./release/repro-build.sh package windows amd64 $VERSION ./out
           SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH ./release/repro-build.sh package linux amd64 $VERSION ./out
 
-          # Install a reproducible standalone binary from proxy.golang.org (Linux example):
-          GO111MODULE=on GOPROXY=$GOPROXY GOSUMDB=$GOSUMDB GOENV=off GOWORK=off GOTELEMETRY=off GOFIPS140=off GOEXPERIMENT= GODEBUG= GOFLAGS= GOBIN= CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=$GOAMD64 GOTOOLCHAIN=go$GO_VERSION go install -trimpath -pgo=off -compiler=gc -ldflags='-s -w -buildid= -X main.version=$VERSION -X github.com/ironpark/ggui.buildID=io.github.ironpark.gvx-desktop' -- github.com/ironpark/gvx-desktop@v$VERSION
+          # Install a reproducible standalone binary from proxy.golang.org (Linux amd64 example):
+          GO111MODULE=on GOPROXY=$GOPROXY GOSUMDB=$GOSUMDB GOENV=off GOWORK=off GOTELEMETRY=off GOFIPS140=off GOEXPERIMENT= GODEBUG= GOFLAGS= GOBIN= CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=$GOAMD64_LINUX GOTOOLCHAIN=go$GO_VERSION go install -trimpath -pgo=off -compiler=gc -ldflags='-s -w -buildid= -X main.version=$VERSION -X github.com/ironpark/ggui.buildID=io.github.ironpark.gvx-desktop' -- github.com/ironpark/gvx-desktop@v$VERSION
           EOF
           cat meta/BUILD_INFO.txt
       - name: Generate SLSA v1.0 build provenance attestation

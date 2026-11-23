@@ -58,6 +58,22 @@ resolve_epoch() {
 	git -C "$repo_root" log -1 --format=%ct
 }
 
+arch_goamd64() {
+	case "$1" in
+	linux) printf '%s\n' "$GOAMD64_LINUX" ;;
+	windows) printf '%s\n' "$GOAMD64_WINDOWS" ;;
+	*) printf '%s\n' "$GOAMD64_DEFAULT" ;;
+	esac
+}
+
+arch_goarm64() {
+	case "$1" in
+	darwin|macos) printf '%s\n' "$GOARM64_DARWIN" ;;
+	windows) printf '%s\n' "$GOARM64_WINDOWS" ;;
+	*) printf '%s\n' "$GOARM64_LINUX" ;;
+	esac
+}
+
 run_repro_pack() {
 	env -i \
 		PATH="$gobin_dir:/usr/local/bin:/usr/bin:/bin" \
@@ -133,6 +149,8 @@ binary)
 	out=${4:?usage: repro-build.sh binary GOOS GOARCH VERSION OUTPUT}
 	mkdir -p -- "$(dirname -- "$out")"
 	out_abs="$(CDPATH= cd -- "$(dirname -- "$out")" && pwd)/$(basename -- "$out")"
+	goamd64=$(arch_goamd64 "$goos")
+	goarm64=$(arch_goarm64 "$goos")
 	ldflags="-s -w -buildid= -X main.version=$version -X github.com/ironpark/ggui.buildID=$app_id"
 	if [ "$goos" = windows ] && [ "${WINDOWS_GUI:-0}" = 1 ]; then
 		ldflags="$ldflags -H=windowsgui"
@@ -159,8 +177,8 @@ binary)
 		CGO_ENABLED=0 \
 		GOOS="$goos" \
 		GOARCH="$goarch" \
-		GOAMD64="$GOAMD64" \
-		GOARM64="$GOARM64" \
+		GOAMD64="$goamd64" \
+		GOARM64="$goarm64" \
 		${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
 		${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
 		${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
@@ -209,6 +227,8 @@ package)
 
 	ggui_dir=$(dirname -- "$ggui_bin")
 	epoch=$(resolve_epoch)
+	goamd64=$(arch_goamd64 "$target")
+	goarm64=$(arch_goarm64 "$target")
 	mkdir -p -- "$outdir"
 	outdir_abs=$(CDPATH= cd -- "$outdir" && pwd)
 
@@ -235,8 +255,8 @@ package)
 			GOFLAGS="-mod=readonly -pgo=off -buildvcs=false" \
 			CGO_ENABLED=0 \
 			GOARCH="$arch" \
-			GOAMD64="$GOAMD64" \
-			GOARM64="$GOARM64" \
+			GOAMD64="$goamd64" \
+			GOARM64="$goarm64" \
 			${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
 			${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
 			${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
@@ -304,9 +324,13 @@ verify-binary)
 	printf '%s\n' "$meta" | grep -Fq "GOOS=$want_os" || fail "expected GOOS=$want_os"
 	printf '%s\n' "$meta" | grep -Fq "GOARCH=$want_arch" || fail "expected GOARCH=$want_arch"
 	if [ "$want_arch" = amd64 ]; then
-		printf '%s\n' "$meta" | grep -Fq "GOAMD64=$GOAMD64" || fail "expected GOAMD64=$GOAMD64"
+		want_level="GOAMD64=$(arch_goamd64 "$want_os")"
+		printf '%s\n' "$meta" | grep -Fq "$want_level" || fail "expected $want_level"
 	elif [ "$want_arch" = arm64 ]; then
-		printf '%s\n' "$meta" | grep -Fq "GOARM64=$GOARM64" || fail "expected GOARM64=$GOARM64"
+		want_level="GOARM64=$(arch_goarm64 "$want_os")"
+		printf '%s\n' "$meta" | grep -Fq "$want_level" || fail "expected $want_level"
+	else
+		want_level="default"
 	fi
 	if printf '%s\n' "$meta" | grep -Eq '^[[:space:]]+build[[:space:]]+vcs\.'; then
 		fail "unexpected VCS metadata embedded in binary"
@@ -315,7 +339,7 @@ verify-binary)
 	if [ -n "$bid" ]; then
 		fail "expected empty Go build ID (-buildid=), got '$bid'"
 	fi
-	echo "verify-binary: $bin ($toolchain $want_os/$want_arch, buildid=empty)"
+	echo "verify-binary: $bin ($toolchain $want_os/$want_arch, $want_level, buildid=empty)"
 	;;
 
 *)
