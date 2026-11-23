@@ -202,7 +202,7 @@ package)
 	}
 
 	ggui_meta=$(GOTOOLCHAIN="$toolchain" "$go_bin" version -m "$ggui_bin")
-	if ! printf '%s\n' "$ggui_meta" | grep -Eq "^[[:space:]]+mod[[:space:]]+github\.com/ironpark/ggui/cmd/ggui[[:space:]]+$GGUI_VERSION([[:space:]]|\$)"; then
+	if ! printf '%s\n' "$ggui_meta" | awk -v ver="$GGUI_VERSION" '$1 == "mod" && $2 == "github.com/ironpark/ggui/cmd/ggui" && $3 == ver { found = 1 } END { exit !found }'; then
 		echo "repro-build: $ggui_bin does not match pinned ggui $GGUI_VERSION; run ./release/repro-build.sh install-ggui" >&2
 		exit 1
 	fi
