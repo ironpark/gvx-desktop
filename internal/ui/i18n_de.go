@@ -1698,6 +1698,10 @@ var german = &i18n.Catalog{
 		"Open external http(s) URLs in your default browser":                   "Externe http(s)-URLs im Standardbrowser öffnen",
 		"Expose a web UI at https://<ext-id>.localhost via the local proxy":    "Eine Web-UI über den lokalen Proxy unter https://<ext-id>.localhost bereitstellen",
 		"Access the external network from the extension runtime":               "Aus der Erweiterungslaufzeit auf das externe Netzwerk zugreifen",
+		"Already up to date": "Bereits auf dem neuesten Stand",
+		"Extension updated":  "Erweiterung aktualisiert",
+		"Update failed":      "Aktualisierung fehlgeschlagen",
+		"Review new permissions and allow it to build.": "Neue Berechtigungen prüfen und Build erlauben.",
 	},
 	Plurals: map[string]i18n.Forms{
 		"%d custom": {One: "%d benutzerdefiniert", Other: "%d benutzerdefiniert"},

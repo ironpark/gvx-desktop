@@ -130,15 +130,13 @@ func extensionPage(m *Model, extID, viewID string) ggui.Widget {
 		}
 
 		// Header chrome
+		lang := ggui.Peek(m.Lang)
 		iconName := viewInfo.Icon
 		if iconName == "" {
 			iconName = info.Icon
 		}
-		titleText := info.Name
-		if titleText == "" {
-			titleText = info.ID
-		}
-		subTitle := viewInfo.Title
+		titleText := info.LocalizedName(lang)
+		subTitle := info.LocalizedViewTitle(viewID, lang)
 		if streamTitle != "" {
 			subTitle = streamTitle
 		}
@@ -179,7 +177,7 @@ func extensionPage(m *Model, extID, viewID string) ggui.Widget {
 				widget.Scroll(tbWidget).Horizontal().Shrink().Bar(color.Transparent),
 			}
 			headerParts = append(headerParts,
-				widget.Expanded(looseHeight{widget.Align(tbScroll).At(1, 0.5)}),
+				widget.Expanded(looseHeight{widget.Align(tbScroll).At(0, 0.5)}),
 				widget.Box().Width(1).Height(18).Fill(colorBorder),
 			)
 		} else {
@@ -187,7 +185,7 @@ func extensionPage(m *Model, extID, viewID string) ggui.Widget {
 		}
 		headerParts = append(headerParts, widget.Row(hostActions...).Gap(4).Align(widget.AlignCenter))
 
-		header := widget.Box(widget.Row(headerParts...).Gap(10).Align(widget.AlignCenter)).Pad(10, 16)
+		header := widget.Box(widget.Row(headerParts...).Gap(12).Align(widget.AlignCenter)).Pad(10, 16)
 
 		var content ggui.Widget
 		switch {

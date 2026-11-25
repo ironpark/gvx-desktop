@@ -1692,6 +1692,10 @@ var hindi = &i18n.Catalog{
 		"Open external http(s) URLs in your default browser":                   "अपने डिफ़ॉल्ट ब्राउज़र में बाहरी http(s) URL खोलें",
 		"Expose a web UI at https://<ext-id>.localhost via the local proxy":    "लोकल प्रॉक्सी के ज़रिए https://<ext-id>.localhost पर वेब UI उपलब्ध कराएँ",
 		"Access the external network from the extension runtime":               "एक्सटेंशन रनटाइम से बाहरी नेटवर्क तक पहुँचें",
+		"Already up to date": "पहले से ही नवीनतम है",
+		"Extension updated":  "एक्सटेंशन अपडेट किया गया",
+		"Update failed":      "अपडेट विफल",
+		"Review new permissions and allow it to build.": "नई अनुमतियों की समीक्षा करें और बिल्ड की अनुमति दें।",
 	},
 	Plurals: map[string]i18n.Forms{
 		"%d custom": {One: "%d कस्टम", Other: "%d कस्टम"},

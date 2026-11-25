@@ -72,13 +72,14 @@ func renderUIBlockTree(extID, viewID string, root, target *uiblock.Node, form *b
 		form.redraw()
 	}
 	v := &extTreeView{
-		extID:   extID,
-		viewID:  viewID,
-		form:    form,
-		onEvent: onEvent,
+		extID:     extID,
+		viewID:    viewID,
+		form:      form,
+		onEvent:   onEvent,
+		inToolbar: target.Kind == uiblock.KindRow && target.Variant == "toolbar",
 	}
 	v.indexMenus(root)
-	if target.Kind == uiblock.KindRow && target.Variant == "toolbar" {
+	if v.inToolbar {
 		return v.node(target, true)
 	}
 	return v.node(target, false)
@@ -177,11 +178,12 @@ type extBlockDrag struct {
 }
 
 type extTreeView struct {
-	extID   string
-	viewID  string
-	form    *blockForm
-	menus   map[string]*uiblock.Node
-	onEvent func(uiblock.Event)
+	extID     string
+	viewID    string
+	form      *blockForm
+	menus     map[string]*uiblock.Node
+	onEvent   func(uiblock.Event)
+	inToolbar bool
 }
 
 func (v *extTreeView) blockID() string {
@@ -383,7 +385,7 @@ func (v *extTreeView) nodeWith(n *uiblock.Node, inLine, bare bool) (out ggui.Wid
 		id := n.ID
 		field := v.form.field(id, n.Value)
 		opts := slices.Clone(n.Options)
-		small := n.Size == "small"
+		small := n.Size == "small" || (v.inToolbar && n.Size != "large")
 		pad := 3.0
 		if small {
 			pad = 2.0
@@ -740,6 +742,10 @@ func (v *extTreeView) buttonNode(n *uiblock.Node, tap func(), bare bool) ggui.Wi
 	badges := n.Badges
 	var b *ui.ButtonWidget
 	iconOnly := text == "" && iconName != "" && len(badges) == 0
+	btnSize := n.Size
+	if btnSize == "" && v.inToolbar {
+		btnSize = "small"
+	}
 	switch {
 	case len(badges) > 0:
 		var parts []ggui.Widget
@@ -747,11 +753,11 @@ func (v *extTreeView) buttonNode(n *uiblock.Node, tap func(), bare bool) ggui.Wi
 			parts = append(parts, extIcon(iconName).Size(14).Color(toneColor(n.Tone)))
 		}
 		if text != "" {
-			parts = append(parts, widget.Text(text).Size(textSize(n.Size)).NoWrap().Ellipsis())
+			parts = append(parts, widget.Text(text).Size(textSize(btnSize)).NoWrap().Ellipsis())
 		}
 		parts = append(parts, renderExtBadges(badges)...)
 		b = ui.ButtonOf(widget.Row(parts...).Gap(4).Align(widget.AlignCenter), tap)
-		switch n.Size {
+		switch btnSize {
 		case "small":
 			b = b.Size(ui.ButtonSmall)
 		case "large":
@@ -759,7 +765,7 @@ func (v *extTreeView) buttonNode(n *uiblock.Node, tap func(), bare bool) ggui.Wi
 		}
 	case iconOnly:
 		b = ui.ButtonOf(widget.Box(), tap).Icon(extIcon(iconName))
-		switch n.Size {
+		switch btnSize {
 		case "small":
 			b = b.Size(ui.ButtonIconSmall)
 		case "large":
@@ -772,7 +778,7 @@ func (v *extTreeView) buttonNode(n *uiblock.Node, tap func(), bare bool) ggui.Wi
 		if iconName != "" {
 			b = b.Icon(extIcon(iconName))
 		}
-		switch n.Size {
+		switch btnSize {
 		case "small":
 			b = b.Size(ui.ButtonSmall)
 		case "large":
@@ -1400,6 +1406,11 @@ func (v *extTreeView) container(n *uiblock.Node, bare bool) ggui.Widget {
 
 	row := kind == uiblock.KindRow
 	toolbar := row && n.Variant == "toolbar"
+	prevToolbar := v.inToolbar
+	if toolbar {
+		v.inToolbar = true
+	}
+	defer func() { v.inToolbar = prevToolbar }()
 	hasGrow := false
 	if row {
 		for _, c := range n.Children {
@@ -1454,7 +1465,7 @@ func (v *extTreeView) container(n *uiblock.Node, bare bool) ggui.Widget {
 	case uiblock.KindRow:
 		if gap == 0 {
 			if toolbar {
-				gap = 6
+				gap = 8
 			} else {
 				gap = 8
 			}

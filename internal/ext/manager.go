@@ -724,6 +724,112 @@ func (m *Manager) Rebuild(id string) error {
 	return m.startLocked(m.managerContext(), rec)
 }
 
+// Update fetches the latest commit for a Git-installed extension, commits the
+// updated checkout, and rebuilds/restarts it when no new permissions were added.
+// If the updated manifest requests new ungranted permissions, the extension enters
+// StateWaiting and needsApproval is returned as true.
+func (m *Manager) Update(id string) (updated bool, needsApproval bool, err error) {
+	return m.updateGit(id, false)
+}
+
+func (m *Manager) updateGit(id string, allowLocal bool) (updated bool, needsApproval bool, err error) {
+	rec, err := m.acquireActiveRecord(id)
+	if err != nil {
+		return false, false, err
+	}
+	defer rec.opMu.Unlock()
+
+	m.mu.Lock()
+	src := rec.source
+	m.mu.Unlock()
+
+	if src.Kind != SourceGit || strings.TrimSpace(src.Repo) == "" {
+		return false, false, fmt.Errorf("extension %q was not installed from a Git repository", id)
+	}
+
+	ctx := m.managerContext()
+	var hasUpdate bool
+	if allowLocal {
+		_, hasUpdate, err = checkGitUpdate(ctx, src.Repo, src.Ref, src.Commit)
+	} else {
+		_, hasUpdate, err = CheckGitUpdate(ctx, src.Repo, src.Ref, src.Commit)
+	}
+	if err != nil {
+		return false, false, err
+	}
+	if !hasUpdate {
+		return false, false, nil
+	}
+
+	prep, err := prepareGitInstall(ctx, m.cfg.DataDir, src.Repo, src.Ref, allowLocal, nil)
+	if err != nil {
+		return false, false, err
+	}
+	defer prep.cleanup(m.cfg.DataDir)
+
+	if prep.man.ID != id {
+		return false, false, fmt.Errorf("updated manifest id %q does not match installed extension %q", prep.man.ID, id)
+	}
+
+	m.stopLocked(rec, 5*time.Second)
+
+	if err := commitGitInstall(m.cfg.DataDir, prep); err != nil {
+		return false, false, err
+	}
+
+	m.mu.Lock()
+	rec.manifest = prep.man
+	rec.manifestErr = ""
+	rec.source = prep.spec
+	rec.crashes = 0
+	rec.idleStopped = false
+	rec.errMsg = ""
+	m.mu.Unlock()
+
+	entry := m.grants.Get(id)
+	_, _, asked := NeedsApproval(prep.man, entry, prep.spec.Commit)
+	if len(asked) > 0 || entry.ApprovedManifestHash == "" {
+		m.mu.Lock()
+		rec.state = StateWaiting
+		m.mu.Unlock()
+		m.notifyChanged()
+		return true, true, nil
+	}
+
+	if err := m.grants.Approve(id, prep.man, prep.spec.Commit); err != nil {
+		return true, false, err
+	}
+
+	if err := m.buildOrPullLocked(ctx, rec); err != nil {
+		m.mu.Lock()
+		if m.closed {
+			if rec.state == StateBuilding || rec.state.IsActive() {
+				rec.state = StateDiscovered
+				rec.errMsg = ""
+			}
+		} else {
+			rec.state = StateFailed
+			rec.errMsg = err.Error()
+		}
+		m.mu.Unlock()
+		m.notifyChanged()
+		return true, false, err
+	}
+	if entry.Disabled {
+		m.mu.Lock()
+		if m.closed && (rec.state == StateBuilding || rec.state.IsActive()) {
+			rec.state = StateDiscovered
+			rec.errMsg = ""
+		} else {
+			rec.state = StateDisabled
+		}
+		m.mu.Unlock()
+		m.notifyChanged()
+		return true, false, nil
+	}
+	return true, false, m.startLocked(ctx, rec)
+}
+
 func (m *Manager) buildOrPullLocked(ctx context.Context, rec *extRecord) error {
 	if rec.manifest == nil || rec.manifest.Runtime.Type != RuntimeSandbox {
 		return nil
@@ -2448,6 +2554,7 @@ func (m *Manager) buildInfoLocked(rec *extRecord) ExtensionInfo {
 		info.Commands = man.ToCommandInfos()
 		info.Tools = man.ToToolInfos()
 		info.Settings = rec.settings.Summaries(man)
+		info.I18n = cloneManifestI18n(man.I18n)
 		if man.WebUI != nil {
 			info.WebUI = &WebUIInfo{
 				Port:  man.WebUI.Port,

@@ -342,3 +342,100 @@ func TestParseManifest_RejectsInvalidUTF8(t *testing.T) {
 		t.Fatalf("expected UTF-8 error message, got: %v", err)
 	}
 }
+
+func TestParseManifestI18nAndLocalizationHelpers(t *testing.T) {
+	raw := []byte(`
+schema_version = 1
+id = "demo-i18n"
+version = "0.2.0"
+publisher = "acme"
+name = "Demo Actions"
+description = "English description."
+
+[runtime]
+type = "sandbox"
+image = "alpine:3.20"
+
+[[contributes.view]]
+id = "main"
+title = "Demo View"
+
+[[contributes.command]]
+id = "run-now"
+title = "Run Now"
+
+[contributes.settings]
+api_url = { type = "string", label = "API URL", description = "Endpoint URL." }
+
+[i18n.ko]
+name = "데모 액션"
+description = "한국어 설명."
+[i18n.ko.views]
+main = "데모 뷰"
+[i18n.ko.commands]
+run-now = "지금 실행"
+[i18n.ko.settings.api_url]
+label = "API 주소"
+description = "엔드포인트 주소입니다."
+
+[i18n.zh-Hant]
+description = "繁體中文說明。"
+`)
+	m, err := ParseManifest(raw)
+	if err != nil {
+		t.Fatalf("ParseManifest with i18n: %v", err)
+	}
+	info := ExtensionInfo{
+		ID:          m.ID,
+		Name:        m.Name,
+		Description: m.Description,
+		Views:       m.ToViewInfos(),
+		Commands:    m.ToCommandInfos(),
+		Settings: []SettingSummary{
+			{Key: "api_url", Label: m.Settings[0].Label, Description: m.Settings[0].Description},
+		},
+		I18n: cloneManifestI18n(m.I18n),
+	}
+	if got := info.LocalizedName("ko"); got != "데모 액션" {
+		t.Fatalf("LocalizedName(ko) = %q", got)
+	}
+	if got := info.LocalizedName("ko-KR"); got != "데모 액션" {
+		t.Fatalf("LocalizedName(ko-KR) = %q", got)
+	}
+	if got := info.LocalizedDescription("zh-Hant"); got != "繁體中文說明。" {
+		t.Fatalf("LocalizedDescription(zh-Hant) = %q", got)
+	}
+	if got := info.LocalizedViewTitle("main", "ko"); got != "데모 뷰" {
+		t.Fatalf("LocalizedViewTitle(ko) = %q", got)
+	}
+	if got := info.LocalizedCommandTitle("run-now", "ko"); got != "지금 실행" {
+		t.Fatalf("LocalizedCommandTitle(ko) = %q", got)
+	}
+	if got := info.LocalizedSettingLabel("api_url", "ko"); got != "API 주소" {
+		t.Fatalf("LocalizedSettingLabel(ko) = %q", got)
+	}
+	if got := info.LocalizedSettingDescription("api_url", "ko"); got != "엔드포인트 주소입니다." {
+		t.Fatalf("LocalizedSettingDescription(ko) = %q", got)
+	}
+	// Fallback to English defaults for missing locale.
+	if got := info.LocalizedCommandTitle("run-now", "fr"); got != "Run Now" {
+		t.Fatalf("LocalizedCommandTitle(fr fallback) = %q", got)
+	}
+
+	// Reject invalid locale tag.
+	badLocale := []byte(`
+schema_version = 1
+id = "bad-loc"
+version = "0.1.0"
+publisher = "acme"
+name = "Bad"
+[runtime]
+type = "sandbox"
+image = "alpine:3.20"
+[i18n."../bad"]
+name = "Nope"
+`)
+	if _, err := ParseManifest(badLocale); err == nil {
+		t.Fatal("expected ParseManifest to reject invalid i18n locale tag")
+	}
+}

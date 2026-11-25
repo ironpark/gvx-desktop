@@ -31,6 +31,7 @@ const (
 	MaxToolParams    = 16
 	MaxSettings      = 32
 	MaxOptions       = 32
+	MaxLocales       = 16
 	MaxTitle         = 80
 	MaxDescription   = 300
 	MinRuntimePort   = 1024
@@ -66,6 +67,7 @@ var (
 	memoryRe     = regexp.MustCompile(`^(?i)\d+(\.\d+)?[bkmgt]?$`)
 	cpusRe       = regexp.MustCompile(`^\d+(?:\.\d+)?$`)
 	iconNameRe   = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	localeTagRe  = regexp.MustCompile(`^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{2,8})*$`)
 )
 
 var (
@@ -105,6 +107,7 @@ type Manifest struct {
 	Tools         []ToolDecl
 	Settings      []SettingDecl
 	WebUI         *WebUIDecl
+	I18n          map[string]ManifestLocale
 	Bundled       bool
 	Hash          string
 }
@@ -212,6 +215,16 @@ type rawManifest struct {
 			Title string `toml:"title"`
 		} `toml:"web_ui"`
 	} `toml:"contributes"`
+	I18n map[string]struct {
+		Name        string            `toml:"name"`
+		Description string            `toml:"description"`
+		Views       map[string]string `toml:"views"`
+		Commands    map[string]string `toml:"commands"`
+		Settings    map[string]struct {
+			Label       string `toml:"label"`
+			Description string `toml:"description"`
+		} `toml:"settings"`
+	} `toml:"i18n"`
 }
 
 type rawRuntime struct {
@@ -513,6 +526,82 @@ func parseManifest(data []byte, bundled bool) (*Manifest, error) {
 			Port:  port,
 			Path:  webPath,
 			Title: w.Title,
+		}
+	}
+
+	if len(raw.I18n) > MaxLocales {
+		return nil, fmt.Errorf("i18n: more than %d locales", MaxLocales)
+	}
+	if len(raw.I18n) > 0 {
+		m.I18n = make(map[string]ManifestLocale, len(raw.I18n))
+		for loc, entry := range raw.I18n {
+			if !localeTagRe.MatchString(loc) {
+				return nil, fmt.Errorf("i18n locale %q must be a valid BCP-47 tag", loc)
+			}
+			if err := checkText("i18n."+loc+".name", entry.Name, MaxTitle, false); err != nil {
+				return nil, err
+			}
+			if err := checkText("i18n."+loc+".description", entry.Description, MaxDescription, false); err != nil {
+				return nil, err
+			}
+			if len(entry.Views) > MaxViews {
+				return nil, fmt.Errorf("i18n.%s.views: more than %d entries", loc, MaxViews)
+			}
+			var views map[string]string
+			if len(entry.Views) > 0 {
+				views = make(map[string]string, len(entry.Views))
+				for vid, title := range entry.Views {
+					if !partIDRe.MatchString(vid) {
+						return nil, fmt.Errorf("i18n.%s.views: invalid view id %q", loc, vid)
+					}
+					if err := checkText("i18n."+loc+".views."+vid, title, MaxTitle, false); err != nil {
+						return nil, err
+					}
+					views[vid] = title
+				}
+			}
+			if len(entry.Commands) > MaxCommands {
+				return nil, fmt.Errorf("i18n.%s.commands: more than %d entries", loc, MaxCommands)
+			}
+			var cmds map[string]string
+			if len(entry.Commands) > 0 {
+				cmds = make(map[string]string, len(entry.Commands))
+				for cid, title := range entry.Commands {
+					if !partIDRe.MatchString(cid) {
+						return nil, fmt.Errorf("i18n.%s.commands: invalid command id %q", loc, cid)
+					}
+					if err := checkText("i18n."+loc+".commands."+cid, title, MaxTitle, false); err != nil {
+						return nil, err
+					}
+					cmds[cid] = title
+				}
+			}
+			if len(entry.Settings) > MaxSettings {
+				return nil, fmt.Errorf("i18n.%s.settings: more than %d entries", loc, MaxSettings)
+			}
+			var sets map[string]SettingLocale
+			if len(entry.Settings) > 0 {
+				sets = make(map[string]SettingLocale, len(entry.Settings))
+				for sk, sv := range entry.Settings {
+					if !settingKeyRe.MatchString(sk) {
+						return nil, fmt.Errorf("i18n.%s.settings: invalid setting key %q", loc, sk)
+					}
+					if err := checkText("i18n."+loc+".settings."+sk+".label", sv.Label, MaxTitle, false); err != nil {
+						return nil, err
+					}
+					if err := checkText("i18n."+loc+".settings."+sk+".description", sv.Description, MaxDescription, false); err != nil {
+						return nil, err
+					}
+					sets[sk] = SettingLocale{Label: sv.Label, Description: sv.Description}
+				}
+			}
+			m.I18n[loc] = ManifestLocale{
+				Name:        entry.Name,
+				Description: entry.Description,
+				Views:       views,
+				Commands:    cmds,
+				Settings:    sets,
+			}
 		}
 	}
 

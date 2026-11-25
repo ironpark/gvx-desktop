@@ -924,6 +924,31 @@ func (m *Model) RebuildExtension(id string) {
 	})
 }
 
+func (m *Model) UpdateExtension(id string) {
+	mgr := m.extMgrPtr.Load()
+	if mgr == nil {
+		return
+	}
+	var updated, needsApproval bool
+	m.async(func(context.Context) error {
+		var err error
+		updated, needsApproval, err = mgr.Update(id)
+		return err
+	}, func(err error) {
+		switch {
+		case err != nil:
+			m.toastError(tr("Update failed"), err)
+		case !updated:
+			m.toastOK(tr("Already up to date"), id)
+		case needsApproval:
+			m.toastOK(tr("Extension updated"), tr("Review new permissions and allow it to build."))
+		default:
+			m.toastOK(tr("Extension updated"), id)
+		}
+		m.refreshExtensions()
+	})
+}
+
 func (m *Model) UninstallExtension(id string, purgeData bool) {
 	mgr := m.extMgrPtr.Load()
 	if mgr == nil {
@@ -1020,7 +1045,8 @@ func extensionInfoEqual(a, b ext.ExtensionInfo) bool {
 		!slices.Equal(a.Commands, b.Commands) ||
 		!toolsEqual(a.Tools, b.Tools) ||
 		!settingsSummaryEqual(a.Settings, b.Settings) ||
-		!webUIEqual(a.WebUI, b.WebUI) {
+		!webUIEqual(a.WebUI, b.WebUI) ||
+		!a.I18nEqual(b) {
 		return false
 	}
 	return true

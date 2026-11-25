@@ -1694,6 +1694,10 @@ var japanese = &i18n.Catalog{
 		"Open external http(s) URLs in your default browser":                   "外部の http(s) URL を既定のブラウザで開きます",
 		"Expose a web UI at https://<ext-id>.localhost via the local proxy":    "ローカルプロキシ経由で https://<ext-id>.localhost に Web UI を公開します",
 		"Access the external network from the extension runtime":               "拡張機能ランタイムから外部ネットワークにアクセスします",
+		"Already up to date": "すでに最新です",
+		"Extension updated":  "拡張機能を更新しました",
+		"Update failed":      "更新に失敗しました",
+		"Review new permissions and allow it to build.": "新しい権限を確認してビルドを許可してください。",
 	},
 	Plurals: map[string]i18n.Forms{
 		"%d custom": {Other: "カスタム %d 個"},

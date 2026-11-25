@@ -2395,3 +2395,134 @@ chrome = "toolbar"
 		})
 	}
 }
+
+func TestExtUI_ToolbarTabsDoNotShiftAcrossTabSwitchesAndManifestI18n(t *testing.T) {
+	t.Cleanup(func() { SetLanguage(LangEnglish) })
+
+	const src = `package main
+
+import (
+	"context"
+	"sync"
+	"github.com/ironpark/gvx-desktop/pkg/extsdk"
+)
+
+func main() {
+	var mu sync.Mutex
+	tab := "Tab A"
+	app := extsdk.New()
+	app.View("main", extsdk.View{
+		Chrome: "toolbar",
+		Render: func(ctx *extsdk.ViewContext, u *extsdk.UI) extsdk.Node {
+			mu.Lock()
+			cur := tab
+			mu.Unlock()
+			actionLabel := "Short"
+			if cur == "Tab B" {
+				actionLabel = "Much Longer Action Button Label"
+			}
+			return u.Column(
+				u.Toolbar(
+					u.Tabs(cur, []string{"Tab A", "Tab B"}, extsdk.Key("tabs"), extsdk.OnChange("set_tab")),
+					u.Button(actionLabel, extsdk.Key("act"), extsdk.Variant("outline"), extsdk.OnTap("noop")),
+				),
+				u.Text("Active:"+cur),
+			).Fill(true)
+		},
+		On: extsdk.Handlers{
+			"set_tab": func(ctx *extsdk.EventContext, val string) error {
+				mu.Lock()
+				tab = val
+				mu.Unlock()
+				ctx.NotifyChanged()
+				return nil
+			},
+			"noop": func(ctx *extsdk.EventContext) error { return nil },
+		},
+	})
+	_ = app.Run(context.Background())
+}
+`
+	extraTOML := `
+[[contributes.view]]
+id = "main"
+title = "English View"
+icon = "box"
+chrome = "toolbar"
+
+[[contributes.command]]
+id = "run-cmd"
+title = "English Command"
+
+[contributes.settings]
+api_url = { type = "string", label = "English Setting", description = "English setting desc" }
+
+[i18n.ko]
+name = "한국어 확장"
+description = "한국어 확장 설명"
+[i18n.ko.views]
+main = "한국어 뷰"
+[i18n.ko.commands]
+run-cmd = "한국어 명령"
+[i18n.ko.settings.api_url]
+label = "한국어 설정"
+description = "한국어 설정 설명"
+`
+	mgr, dataDir, _, _ := extUINewManager(t, true)
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("mgr.Start: %v", err)
+	}
+	extUIInstallBinary(t, mgr, "stable-tb", "English Ext", src, extraTOML)
+
+	m, p := extUINewProbe(t, dataDir, mgr, ggui.Sz(1280, 800), nil)
+	defer p.Close()
+	p.Frame()
+
+	m.Go(ExtensionPage("stable-tb", "main"))
+	extUISettle(t, p, func() bool {
+		return extUISemHasText(p.Semantics(), "Active:Tab A")
+	}, "Tab A rendered")
+
+	tabABefore, ok := extUIFindSemNode(p.Semantics(), ggui.RoleTab, "Tab A")
+	if !ok {
+		t.Fatalf("Tab A not found:\n%s", p.Semantics())
+	}
+
+	// Switch to Tab B (which renders a much wider trailing action button) and verify Tab A's X did not shift!
+	extUITapSem(t, p, ggui.RoleTab, "Tab B")
+	extUISettle(t, p, func() bool {
+		return extUISemHasText(p.Semantics(), "Active:Tab B")
+	}, "Tab B rendered")
+
+	tabAAfter, ok := extUIFindSemNode(p.Semantics(), ggui.RoleTab, "Tab A")
+	if !ok {
+		t.Fatalf("Tab A not found after switch:\n%s", p.Semantics())
+	}
+	dx := tabAAfter.Full.Origin.X - tabABefore.Full.Origin.X
+	if dx < -0.5 || dx > 0.5 {
+		t.Fatalf("lifted toolbar tab shifted horizontally on tab switch: before=%.1f after=%.1f",
+			tabABefore.Full.Origin.X, tabAAfter.Full.Origin.X)
+	}
+
+	// Switch app language to Korean -> verify manifest [i18n.ko] translates sidebar, header, settings, and palette!
+	m.UpdateSettings(func(s *store.Settings) { s.Language = LangKorean })
+	extUISettle(t, p, func() bool {
+		sem := p.Semantics()
+		return extUISemHasText(sem, "한국어 뷰") && extUISemHasText(sem, "한국어 확장")
+	}, "Korean manifest name and view title rendered")
+
+	m.PaletteQuery.Set("")
+	m.PaletteOpen.Set(true)
+	extUISettle(t, p, func() bool {
+		return extUISemHasText(p.Semantics(), "한국어 명령")
+	}, "Korean manifest command rendered in palette")
+	m.PaletteOpen.Set(false)
+
+	m.Go(PageExtensions)
+	extUISettle(t, p, func() bool {
+		sem := p.Semantics()
+		return extUISemHasText(sem, "한국어 확장 설명") &&
+			extUISemHasText(sem, "한국어 설정") &&
+			extUISemHasText(sem, "한국어 설정 설명")
+	}, "Korean manifest description and setting labels rendered in Extensions page")
+}

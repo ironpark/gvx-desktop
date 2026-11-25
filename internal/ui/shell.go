@@ -161,18 +161,16 @@ type sidebarKey struct {
 // highlight, hover and collapse across.
 func sidebar(m *Model) ggui.Widget {
 	state := ggui.Derived(func() sidebarKey {
+		lang := m.Lang.Get()
 		var extItems []sidebarExtKey
 		for _, info := range m.Extensions.Get() {
 			if !info.State.CanRun() || len(info.Views) == 0 {
 				continue
 			}
 			for _, v := range info.Views {
-				lbl := v.Title
+				lbl := info.LocalizedViewTitle(v.ID, lang)
 				if lbl == "" {
-					lbl = info.Name
-				}
-				if lbl == "" {
-					lbl = info.ID
+					lbl = info.LocalizedName(lang)
 				}
 				ic := v.Icon
 				if ic == "" {
@@ -902,20 +900,15 @@ func palette(m *Model) ggui.Widget {
 		for i, r := range rows {
 			sbs[i] = paletteSandbox{id: r.Spec.ID, name: r.Spec.Name, image: r.Spec.Image, status: r.State.Status, paused: r.State.Paused}
 		}
+		lang := m.Lang.Get()
 		var extCmds []paletteExtCmd
 		for _, info := range m.Extensions.Get() {
 			if !info.State.CanRun() {
 				continue
 			}
-			extName := info.Name
-			if extName == "" {
-				extName = info.ID
-			}
+			extName := info.LocalizedName(lang)
 			for _, c := range info.Commands {
-				title := c.Title
-				if title == "" {
-					title = c.ID
-				}
+				title := info.LocalizedCommandTitle(c.ID, lang)
 				extCmds = append(extCmds, paletteExtCmd{
 					extID:   info.ID,
 					cmdID:   c.ID,

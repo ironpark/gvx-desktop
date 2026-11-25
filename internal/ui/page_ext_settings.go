@@ -180,10 +180,8 @@ func extensionSettingsCard(m *Model, info ext.ExtensionInfo, st *extSettingsCard
 	showLogs := st.showLogs
 	purgeData := st.purgeData
 
-	title := info.Name
-	if title == "" {
-		title = info.ID
-	}
+	lang := ggui.Peek(m.Lang)
+	title := info.LocalizedName(lang)
 	iconName := info.Icon
 	if iconName == "" {
 		iconName = "package"
@@ -203,6 +201,9 @@ func extensionSettingsCard(m *Model, info ext.ExtensionInfo, st *extSettingsCard
 	if len(info.Views) > 0 && canStreamExtension(info) {
 		viewID := info.Views[0].ID
 		actions = append(actions, ui.Button(tr("Open"), func() { m.Go(ExtensionPage(id, viewID)) }).Outline().Size(ui.ButtonSmall))
+	}
+	if info.Source.Kind == ext.SourceGit && info.State != ext.StateWaiting && info.State != ext.StateBuilding {
+		actions = append(actions, ui.Button(tr("Update"), func() { m.UpdateExtension(id) }).Outline().Size(ui.ButtonSmall))
 	}
 	switch info.State {
 	case ext.StateWaiting:
@@ -238,8 +239,8 @@ func extensionSettingsCard(m *Model, info ext.ExtensionInfo, st *extSettingsCard
 	).Gap(12).Align(widget.AlignCenter)
 
 	rows := []ggui.Widget{headerRow}
-	if info.Description != "" {
-		rows = append(rows, ui.Caption(info.Description))
+	if desc := info.LocalizedDescription(lang); desc != "" {
+		rows = append(rows, ui.Caption(desc))
 	}
 	if info.Error != "" {
 		rows = append(rows, ui.Alert(tr("Error"), info.Error).Destructive().Icon(icons.Alert))
@@ -294,6 +295,8 @@ func extensionSettingsCard(m *Model, info ext.ExtensionInfo, st *extSettingsCard
 	if len(info.Settings) > 0 {
 		setRows := []ggui.Widget{ui.Heading(tr("Settings")).Size(13)}
 		for _, s := range info.Settings {
+			s.Label = info.LocalizedSettingLabel(s.Key, lang)
+			s.Description = info.LocalizedSettingDescription(s.Key, lang)
 			setRows = append(setRows, extSettingRow(m, id, s, st))
 		}
 		rows = append(rows, ui.Divider(), widget.Column(setRows...).Gap(10).Stretch())

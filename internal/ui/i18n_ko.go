@@ -1700,6 +1700,10 @@ var korean = &i18n.Catalog{
 		"Open external http(s) URLs in your default browser":                   "외부 http(s) URL을 기본 브라우저에서 엽니다",
 		"Expose a web UI at https://<ext-id>.localhost via the local proxy":    "로컬 프록시를 통해 https://<ext-id>.localhost에 웹 UI를 노출합니다",
 		"Access the external network from the extension runtime":               "확장 런타임에서 외부 네트워크에 접근합니다",
+		"Already up to date": "이미 최신 상태입니다",
+		"Extension updated":  "확장 업데이트됨",
+		"Update failed":      "업데이트 실패",
+		"Review new permissions and allow it to build.": "새 권한을 검토하고 빌드를 허용하세요.",
 	},
 	Plurals: map[string]i18n.Forms{
 		"%d custom": {Other: "사용자 정의 %d개"},

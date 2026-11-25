@@ -1686,6 +1686,10 @@ var traditionalChinese = &i18n.Catalog{
 		"Open external http(s) URLs in your default browser":                   "在預設瀏覽器中開啟外部 http(s) 網址",
 		"Expose a web UI at https://<ext-id>.localhost via the local proxy":    "透過本機代理於 https://<ext-id>.localhost 公開 Web UI",
 		"Access the external network from the extension runtime":               "從擴充功能執行時期存取外部網路",
+		"Already up to date": "已是最新版本",
+		"Extension updated":  "擴充功能已更新",
+		"Update failed":      "更新失敗",
+		"Review new permissions and allow it to build.": "請檢視新權限並允許建置。",
 	},
 	Plurals: map[string]i18n.Forms{
 		"%d custom": {Other: "自訂 %d 個"},
