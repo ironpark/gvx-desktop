@@ -6,9 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-11-26
+
+### Added
+
+- **Per-image micro-VM routing rules**: register specific Docker images or wildcard patterns (such as `postgres:16` or `ghcr.io/org/*`) to automatically run in the per-container Linux micro-VM runtime without needing `--runtime=microvm` (explicit `--runtime=gvx` still overrides). Manage rules live in **Labs → Cross-architecture & micro-VMs** or toggle them directly from an image's menu (**Always run in micro-VM** / **Stop running in micro-VM**) on the **Images** page, where matching images display a `micro-VM` badge across all 7 UI languages.
+- **Git extension updates & manifest `[i18n]`**: added one-click **Update** for Git-installed extensions (`git pull --ff-only` and automatic rebuild, pausing for permission approval if new permissions are requested), and added `[i18n.<locale>]` localization support in `extension.toml` for extension names, descriptions, views, commands, and settings labels across the sidebar, extension headers, command palette, and settings.
+
 ### Changed
 
-- The update notice for a Homebrew install gives `brew update` and `brew upgrade --cask ironpark/tap/gvx-desktop` as two commands, with the cask's full tap name, as the README does. The banner no longer puts the command in its sentence: **Copy command** copies both lines, and **Settings** shows them in a code block, as it does for the other package managers.
+- **Stable left-aligned extension toolbar**: left-aligned lifted extension toolbars (`chrome = "toolbar"`) with compact toolbar button sizing so tabs stay anchored across view switches.
+- The update notice for a Homebrew install gives `brew update` and `brew upgrade --cask ironpark/tap/gvx-desktop` as two commands, with the cask's full tap name, as the README does. The banner no longer puts the command in its sentence: **Copy command** copies both lines, and **Settings** shows them in a code block, as it does for the other package managers ([#18](https://github.com/ironpark/gvx-desktop/pull/18)).
 
 ## [0.11.2] - 2026-11-26
 
@@ -207,7 +215,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Initial release of GVX Desktop for Apple silicon macOS with Homebrew cask distribution.
 - Sandbox management, image registry search (Docker Hub & Quay), `ext4lite`/`hostfs` volumes, checkpoint snapshots, `rungv` installer/updater, and English & Korean UI.
 
-[Unreleased]: https://github.com/ironpark/gvx-desktop/compare/v0.11.2...HEAD
+[Unreleased]: https://github.com/ironpark/gvx-desktop/compare/v0.11.3...HEAD
+[0.11.3]: https://github.com/ironpark/gvx-desktop/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/ironpark/gvx-desktop/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/ironpark/gvx-desktop/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/ironpark/gvx-desktop/compare/v0.10.2...v0.11.0
