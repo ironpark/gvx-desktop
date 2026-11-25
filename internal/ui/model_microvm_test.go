@@ -742,3 +742,138 @@ func TestRefreshAllOnLabsRefreshesMicroVMState(t *testing.T) {
 		t.Fatalf("after RefreshAll on PageLabs: MicroVMState = %+v, want Enabled=true RunningVMs=3 Assets=2", got)
 	}
 }
+
+func TestMicroVMImagesRegistrationPersistenceLiveSyncAndUI(t *testing.T) {
+	prevPlatform := amd64BuilderPlatform
+	amd64BuilderPlatform = func() bool { return true }
+	defer func() { amd64BuilderPlatform = prevPlatform }()
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("GVX_RUNGV", "")
+
+	dir := t.TempDir()
+	st := store.Store{Dir: dir}
+	set := store.DefaultSettings()
+	set.Language = LangEnglish
+	set.SandboxEngine = true
+	set.MicroVMContainers = true
+	set.RungvPath = dir + "/missing-rungv"
+	_ = st.SaveSettings(set)
+
+	var m *Model
+	p := ggui.ProbeBuilder(func() ggui.Widget { return ggui.Provide(ggui.ReducedMotionKey, true, Build(m)) }, ggui.Sz(1200, 2600))
+	p.Setup(func() {
+		m = NewModel(st, dir)
+		m.Attach(p)
+	})
+	defer p.Close()
+	p.Frame()
+
+	fake := &fakeSandboxEngine{
+		microVMState: engine.MicroVMState{Enabled: true, Assets: "2"},
+	}
+	m.sandboxEngine = fake
+
+	// 1. Register image rules -> normalized, deduplicated, persisted, and synced live to engine.
+	m.AddMicroVMImage("  Postgres:16 ")
+	extUISettle(t, p, func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		return len(fake.microVMConfigs) >= 1
+	}, "SetMicroVM synced after first AddMicroVMImage")
+
+	m.AddMicroVMImage("postgres:16")          // duplicate ignored
+	m.AddMicroVMImage("bad image with space") // invalid ignored
+	m.AddMicroVMImage("ghcr.io/ironpark/*")
+	extUISettle(t, p, func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		return len(fake.microVMConfigs) >= 2
+	}, "SetMicroVM synced after second AddMicroVMImage")
+
+	saved, err := st.Settings()
+	if err != nil {
+		t.Fatalf("LoadSettings: %v", err)
+	}
+	wantImages := []string{"postgres:16", "ghcr.io/ironpark/*"}
+	if !slices.Equal(saved.MicroVMImages, wantImages) {
+		t.Fatalf("persisted MicroVMImages = %v, want %v", saved.MicroVMImages, wantImages)
+	}
+	fake.mu.Lock()
+	lastCfg := fake.microVMConfigs[len(fake.microVMConfigs)-1]
+	fake.mu.Unlock()
+	if lastCfg == nil || !slices.Equal(lastCfg.Images, wantImages) {
+		t.Fatalf("live SetMicroVM Images = %+v, want %v", lastCfg, wantImages)
+	}
+
+	// 2. Labs page displays the registered patterns and remove controls.
+	m.Page.Set(PageLabs)
+	p.Frame()
+	sem := p.Semantics().String()
+	if !strings.Contains(sem, "Images that always run in a micro-VM") ||
+		!strings.Contains(sem, "postgres:16") ||
+		!strings.Contains(sem, "ghcr.io/ironpark/*") {
+		t.Fatalf("Labs page missing micro-VM image rules:\n%s", sem)
+	}
+
+	// 3. Images page shows micro-VM badge for matching host-arch images and menu toggle.
+	m.Offline = true
+	m.DockerImages.Set(Listing[dockerapi.Image]{
+		Loaded: true,
+		Items: []dockerapi.Image{
+			{
+				ID: "sha256:aaa111122223333", RepoTags: []string{"postgres:16"}, Size: 10 << 20, Created: time.Now().Unix(),
+				Manifests: []dockerapi.ImageManifest{{
+					ID: "sha256:aaa", Available: true, Kind: "image",
+					ImageData: &dockerapi.ImageManifestData{Platform: dockerapi.ImagePlatform{Architecture: runtime.GOARCH, OS: "linux"}},
+				}},
+			},
+			{
+				ID: "sha256:bbb111122223333", RepoTags: []string{"redis:7"}, Size: 10 << 20, Created: time.Now().Unix(),
+				Manifests: []dockerapi.ImageManifest{{
+					ID: "sha256:bbb", Available: true, Kind: "image",
+					ImageData: &dockerapi.ImageManifestData{Platform: dockerapi.ImagePlatform{Architecture: runtime.GOARCH, OS: "linux"}},
+				}},
+			},
+		},
+	})
+	m.GoImages(ImagesDocker)
+	p.Frame()
+	if !strings.Contains(p.Semantics().String(), "micro-VM") {
+		t.Fatalf("Images page missing micro-VM badge for registered postgres:16:\n%s", p.Semantics())
+	}
+	if runtime.GOARCH == "arm64" {
+		p.Tap("More actions for postgres:16")
+		p.Frame()
+		if _, ok := p.Semantics().Find(ggui.RoleMenuItem, "Stop running in micro-VM"); !ok {
+			t.Fatalf("registered image menu missing Stop running in micro-VM:\n%s", p.Semantics())
+		}
+		p.Tap("Copy reference")
+		p.Frame()
+		p.Tap("More actions for redis:7")
+		p.Frame()
+		if _, ok := p.Semantics().Find(ggui.RoleMenuItem, "Always run in micro-VM"); !ok {
+			t.Fatalf("unregistered image menu missing Always run in micro-VM:\n%s", p.Semantics())
+		}
+		p.Tap("Copy reference")
+		p.Frame()
+	}
+	m.Offline = false
+
+	// 4. RemoveMicroVMImage removes rule, persists, and pushes live SetMicroVM.
+	fake.mu.Lock()
+	prevCalls := len(fake.microVMConfigs)
+	fake.mu.Unlock()
+	m.RemoveMicroVMImage("postgres:16")
+	extUISettle(t, p, func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		return len(fake.microVMConfigs) > prevCalls
+	}, "SetMicroVM synced after RemoveMicroVMImage")
+
+	saved, _ = st.Settings()
+	if !slices.Equal(saved.MicroVMImages, []string{"ghcr.io/ironpark/*"}) {
+		t.Fatalf("after remove MicroVMImages = %v, want [ghcr.io/ironpark/*]", saved.MicroVMImages)
+	}
+}

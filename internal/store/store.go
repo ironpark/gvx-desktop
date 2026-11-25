@@ -101,6 +101,11 @@ type Settings struct {
 	// micro-VM containers; 0 selects DefaultMicroVMCPUs / DefaultMicroVMMemoryMiB.
 	MicroVMCPUs      int `json:"microVmCpus,omitempty"`
 	MicroVMMemoryMiB int `json:"microVmMemoryMiB,omitempty"`
+	// MicroVMImages lists image references or wildcard patterns (e.g. "postgres:16",
+	// "postgres", "ghcr.io/org/*") that automatically run in the per-container
+	// Linux micro-VM runtime when MicroVMContainers is enabled and no explicit
+	// --runtime flag overrides it.
+	MicroVMImages []string `json:"microVmImages,omitempty"`
 	// DockerExposeLAN publishes container ports on 0.0.0.0 (all interfaces)
 	// instead of loopback 127.0.0.1 only (opt-in; defaults to false).
 	DockerExposeLAN bool `json:"docker_expose_lan,omitempty"`
@@ -185,10 +190,11 @@ func (s Settings) MicroVMMemoryMiBOrDefault() int {
 // Equal makes Settings comparable for signals, which a list in it keeps
 // == from doing.
 func (s Settings) Equal(o Settings) bool {
-	if !slices.Equal(s.Resume, o.Resume) {
+	if !slices.Equal(s.Resume, o.Resume) || !slices.Equal(s.MicroVMImages, o.MicroVMImages) {
 		return false
 	}
 	s.Resume, o.Resume = nil, nil
+	s.MicroVMImages, o.MicroVMImages = nil, nil
 	return reflect.DeepEqual(s, o) // which tells a nil list of shared folders from an empty one
 }
 

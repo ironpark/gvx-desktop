@@ -399,6 +399,9 @@ func (e *Engine) resolveCreateImage(ctx context.Context, ref, platform, requeste
 		if err != nil {
 			return ImageInspect{}, "", "", err
 		}
+		if reqRuntime == "" && e.isMicroVMEnabled() && e.matchesMicroVMImage(ref, img.RepoTags) {
+			targetRuntime = RuntimeMicroVM
+		}
 		e.enrichImageHealthcheck(ctx, &img)
 		return img, targetRuntime, "linux/" + hostImageArch, nil
 	}
@@ -408,6 +411,9 @@ func (e *Engine) resolveCreateImage(ctx context.Context, ref, platform, requeste
 	if err == nil {
 		targetRuntime := RuntimeGVX
 		if reqRuntime == RuntimeMicroVM {
+			targetRuntime = RuntimeMicroVM
+		}
+		if reqRuntime == "" && e.isMicroVMEnabled() && e.matchesMicroVMImage(ref, img.RepoTags) {
 			targetRuntime = RuntimeMicroVM
 		}
 		e.enrichImageHealthcheck(ctx, &img)

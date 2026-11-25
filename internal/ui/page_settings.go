@@ -906,8 +906,53 @@ func microVMSettings(m *Model) ggui.Widget {
 			tr("Run linux/amd64 containers automatically with Rosetta, or run linux/arm64 containers on a real Linux kernel with --runtime=microvm. Each container gets an isolated VM and returns all memory when stopped."),
 			ui.Switch(enabled, "").Name(tr("Micro-VM container runtime")).BindDisabled(disabled)),
 		resourcesRow,
+		microVMImagesSection(m, resourcesDisabled),
 		statusBox,
 	).Gap(10).Stretch()
+}
+
+func microVMImagesSection(m *Model, disabled ggui.Readable[bool]) ggui.Widget {
+	draft := ggui.State("")
+	submit := func() {
+		raw := strings.TrimSpace(ggui.Peek(draft))
+		if raw == "" {
+			return
+		}
+		m.AddMicroVMImage(raw)
+		draft.Set("")
+	}
+	inputRow := widget.Row(
+		widget.Expanded(ui.TextField(draft).
+			Placeholder("postgres:16, ghcr.io/org/*").
+			Name(tr("Image or pattern")).
+			OnSubmit(func(string) { submit() }).
+			BindDisabled(disabled)),
+		ui.Button(tr("Add"), submit).Outline().Size(ui.ButtonSmall).Icon(glyph(lucide.Plus, 14)).BindDisabled(disabled),
+	).Gap(8).Align(widget.AlignCenter)
+
+	images := ggui.Map(m.Settings, func(s storeSettings) []string { return s.MicroVMImages }).WithEqual(slices.Equal[[]string])
+	list := ggui.View(images, func(items []string) ggui.Widget {
+		if len(items) == 0 {
+			return ui.Caption(tr(`No images registered yet. Add an image above or choose "Always run in micro-VM" from the Images page.`)).Size(12)
+		}
+		rows := make([]ggui.Widget, 0, len(items))
+		for _, item := range items {
+			pat := item
+			rows = append(rows, widget.Row(
+				glyph(lucide.Cpu, 14).Color(colorGray),
+				widget.Expanded(ui.Mono(pat).Size(12).NoWrap().Ellipsis()),
+				tip(iconButton(lucide.X, tr("Remove %s from micro-VM images", pat), func() { m.RemoveMicroVMImage(pat) }), tr("Remove")),
+			).Gap(8).Align(widget.AlignCenter))
+		}
+		return widget.Box(widget.Column(rows...).Gap(4).Stretch()).Pad(8, 10).Radius(8).Border(1, colorBorder)
+	})
+
+	return widget.Column(
+		widget.Text(tr("Images that always run in a micro-VM")).Size(13).Weight(ggui.WeightMedium),
+		ui.Caption(tr("Containers from matching images start in a Linux micro-VM automatically without passing --runtime=microvm. Use a repository (postgres), exact tag (postgres:16), or wildcard (ghcr.io/org/*).")).Size(12),
+		inputRow,
+		list,
+	).Gap(6).Stretch()
 }
 
 // microVMStatus shows the live micro-VM container runtime status: running

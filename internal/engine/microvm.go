@@ -75,6 +75,9 @@ type MicroVMConfig struct {
 	DefaultCPUs int
 	// DefaultMemMB is the default memory in MiB per micro-VM (0 -> 1024).
 	DefaultMemMB int
+	// Images lists image references or wildcard patterns that automatically run
+	// in the micro-VM runtime when no explicit --runtime flag overrides it.
+	Images []string
 }
 
 // MicroVMState reports the micro-VM runtime's live status for the UI.
@@ -111,7 +114,31 @@ func cloneMicroVMConfig(cfg *MicroVMConfig) *MicroVMConfig {
 	if cfg.Launcher.Args != nil {
 		cp.Launcher.Args = slices.Clone(cfg.Launcher.Args)
 	}
+	if cfg.Images != nil {
+		cp.Images = slices.Clone(cfg.Images)
+	}
 	return &cp
+}
+
+func (e *Engine) matchesMicroVMImage(ref string, repoTags []string) bool {
+	e.mvm.mu.Lock()
+	var patterns []string
+	if e.mvm.cfg != nil {
+		patterns = e.mvm.cfg.Images
+	}
+	e.mvm.mu.Unlock()
+	if len(patterns) == 0 {
+		return false
+	}
+	if MatchMicroVMImage(patterns, ref) {
+		return true
+	}
+	for _, tag := range repoTags {
+		if MatchMicroVMImage(patterns, tag) {
+			return true
+		}
+	}
+	return false
 }
 
 // microVMStream is the subset of *vmclient.ContainerStream used by microvm.go.

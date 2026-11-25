@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -304,6 +305,7 @@ func (m *Model) microVMConfig(set store.Settings) (*engine.MicroVMConfig, error)
 		},
 		DefaultCPUs:  cpus,
 		DefaultMemMB: memMiB,
+		Images:       slices.Clone(set.MicroVMImages),
 	}, nil
 }
 
@@ -350,6 +352,63 @@ func (m *Model) SetMicroVMResources(cpus, memMiB int) {
 	m.UpdateSettings(func(s *store.Settings) {
 		s.MicroVMCPUs = cpus
 		s.MicroVMMemoryMiB = memMiB
+	})
+	if m.Offline || m.sandboxEngine == nil {
+		return
+	}
+	if set := ggui.Peek(m.Settings); set.SandboxEngine && set.MicroVMContainers {
+		m.applyMicroVMConfig(true)
+	}
+}
+
+// AddMicroVMImage registers an image reference or wildcard pattern so containers
+// created from matching images automatically run in the Linux micro-VM runtime.
+func (m *Model) AddMicroVMImage(raw string) {
+	pat := engine.NormalizeMicroVMImagePattern(raw)
+	if pat == "" {
+		return
+	}
+	cur := ggui.Peek(m.Settings)
+	if slices.Contains(cur.MicroVMImages, pat) {
+		return
+	}
+	m.UpdateSettings(func(s *store.Settings) {
+		if !slices.Contains(s.MicroVMImages, pat) {
+			s.MicroVMImages = append(slices.Clone(s.MicroVMImages), pat)
+		}
+	})
+	if m.Offline || m.sandboxEngine == nil {
+		return
+	}
+	if set := ggui.Peek(m.Settings); set.SandboxEngine && set.MicroVMContainers {
+		m.applyMicroVMConfig(true)
+	}
+}
+
+// RemoveMicroVMImage unregisters a micro-VM image rule and updates the live
+// engine configuration without disrupting running micro-VMs.
+func (m *Model) RemoveMicroVMImage(raw string) {
+	pat := engine.NormalizeMicroVMImagePattern(raw)
+	if pat == "" {
+		pat = strings.TrimSpace(raw)
+	}
+	cur := ggui.Peek(m.Settings)
+	if !slices.Contains(cur.MicroVMImages, pat) && !slices.Contains(cur.MicroVMImages, raw) {
+		return
+	}
+	m.UpdateSettings(func(s *store.Settings) {
+		next := make([]string, 0, len(s.MicroVMImages))
+		for _, item := range s.MicroVMImages {
+			if item == pat || item == raw {
+				continue
+			}
+			next = append(next, item)
+		}
+		if len(next) == 0 {
+			s.MicroVMImages = nil
+		} else {
+			s.MicroVMImages = next
+		}
 	})
 	if m.Offline || m.sandboxEngine == nil {
 		return
