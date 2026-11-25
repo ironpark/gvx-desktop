@@ -259,7 +259,7 @@ func TestCommand(t *testing.T) {
 		in   Install
 		want string
 	}{
-		{Install{Method: Homebrew}, "brew update && brew upgrade --cask gvx-desktop"},
+		{Install{Method: Homebrew}, "brew update\nbrew upgrade --cask ironpark/tap/gvx-desktop"},
 		{Install{Method: Chocolatey}, "choco upgrade gvx-desktop -y"},
 		{Install{Method: Deb}, `cd "$(mktemp -d)" && curl -fL -O https://github.com/ironpark/gvx-desktop/releases/download/v0.6.0/gvx-desktop_0.6.0_amd64.deb -O https://github.com/ironpark/gvx-desktop/releases/download/v0.6.0/gvx-desktop_0.6.0_amd64.deb.sha256 && sha256sum -c gvx-desktop_0.6.0_amd64.deb.sha256 && sudo apt install ./gvx-desktop_0.6.0_amd64.deb`},
 		{Install{Method: RPM, Tool: "dnf"}, `cd "$(mktemp -d)" && curl -fL -O https://example.com/x.rpm -O https://example.com/x.rpm.sha256 && sha256sum -c gvx-desktop-0.6.0-1.x86_64.rpm.sha256 && sudo dnf install ./gvx-desktop-0.6.0-1.x86_64.rpm`},
@@ -306,7 +306,7 @@ func TestCommandForVersion(t *testing.T) {
 		arch string
 		want string
 	}{
-		{Install{Method: Homebrew}, "0.9.0", "arm64", "brew update && brew upgrade --cask gvx-desktop"},
+		{Install{Method: Homebrew}, "0.9.0", "arm64", "brew update\nbrew upgrade --cask ironpark/tap/gvx-desktop"},
 		{Install{Method: Chocolatey}, "0.9.0", "amd64", "choco upgrade gvx-desktop -y"},
 		{Install{Method: Deb}, "0.9.0", "amd64", `cd "$(mktemp -d)" && curl -fL -O https://github.com/ironpark/gvx-desktop/releases/download/v0.9.0/gvx-desktop_0.9.0_amd64.deb -O https://github.com/ironpark/gvx-desktop/releases/download/v0.9.0/gvx-desktop_0.9.0_amd64.deb.sha256 && sha256sum -c gvx-desktop_0.9.0_amd64.deb.sha256 && sudo apt install ./gvx-desktop_0.9.0_amd64.deb`},
 		{Install{Method: RPM, Tool: "dnf"}, "v0.9.0", "arm64", `cd "$(mktemp -d)" && curl -fL -O https://github.com/ironpark/gvx-desktop/releases/download/v0.9.0/gvx-desktop-0.9.0-1.aarch64.rpm -O https://github.com/ironpark/gvx-desktop/releases/download/v0.9.0/gvx-desktop-0.9.0-1.aarch64.rpm.sha256 && sha256sum -c gvx-desktop-0.9.0-1.aarch64.rpm.sha256 && sudo dnf install ./gvx-desktop-0.9.0-1.aarch64.rpm`},

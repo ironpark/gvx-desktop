@@ -76,6 +76,9 @@ func TestAppUpdateBanner(t *testing.T) {
 	shows(false, "a development build")
 }
 
+// brewCommand is what updates a copy Homebrew installed.
+const brewCommand = "brew update\nbrew upgrade --cask ironpark/tap/gvx-desktop"
+
 func TestAppUpdateActionFollowsTheInstall(t *testing.T) {
 	m, p := appUpdateModel(t)
 	for _, c := range []struct {
@@ -84,7 +87,7 @@ func TestAppUpdateActionFollowsTheInstall(t *testing.T) {
 	}{
 		{AppUpdate{Install: appupdate.Install{Method: appupdate.Bundle}}, "Update"},
 		{AppUpdate{Install: appupdate.Install{Method: appupdate.Program}, Ready: true}, "Restart to update"},
-		{AppUpdate{Install: appupdate.Install{Method: appupdate.Homebrew}, Command: "brew update && brew upgrade --cask gvx-desktop"}, "Copy command"},
+		{AppUpdate{Install: appupdate.Install{Method: appupdate.Homebrew}, Command: brewCommand}, "Copy command"},
 		{AppUpdate{Install: appupdate.Install{Method: appupdate.Deb}}, "Open the release page"}, // no package to name
 		{AppUpdate{Install: appupdate.Install{Method: appupdate.Manual}}, "Open the release page"},
 	} {
@@ -98,9 +101,18 @@ func TestAppUpdateActionFollowsTheInstall(t *testing.T) {
 			t.Errorf("%v: no %q in the window", c.u.Install.Method, c.verb)
 		}
 	}
-	if !strings.Contains(appUpdateText(AppUpdate{Install: appupdate.Install{Method: appupdate.Homebrew}, Command: "brew update && brew upgrade --cask gvx-desktop"}), "brew update && brew upgrade --cask gvx-desktop") {
-		t.Error("Homebrew's banner does not name the command")
+	// Homebrew's command is two lines, which do not fit in the banner's
+	// sentence: the banner leaves it to its button, and the settings show it
+	// in a block to copy.
+	brew := AppUpdate{Tag: "v0.6.0", Install: appupdate.Install{Method: appupdate.Homebrew}, Command: brewCommand}
+	if strings.Contains(appUpdateText(brew), "brew update") {
+		t.Error("Homebrew's banner puts the command in its sentence")
 	}
+	m.AppUpdate.Set(brew)
+	m.Go(PageSettings)
+	extUISettle(t, p, func() bool {
+		return strings.Contains(p.Semantics().String(), "brew update\\nbrew upgrade --cask ironpark/tap/gvx-desktop")
+	}, "the settings show Homebrew's command")
 }
 
 // The restart that puts the update in place asks first, and says the
@@ -287,7 +299,7 @@ func TestAppUpdateControllerSignedFeedAndHooks(t *testing.T) {
 	waitFor(func() bool { return ggui.Peek(m.UpdateCtrl.Phase) == updater.PhaseAvailable }, "homebrew manual check available")
 	p.Frame()
 	sem := p.Semantics().String()
-	if !strings.Contains(sem, "brew update && brew upgrade --cask gvx-desktop") {
+	if !strings.Contains(sem, "brew upgrade --cask ironpark/tap/gvx-desktop") {
 		t.Errorf("Homebrew updater dialog should show brew command:\n%s", sem)
 	}
 	if !strings.Contains(sem, "Copy command") {

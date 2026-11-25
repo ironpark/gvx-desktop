@@ -89,7 +89,7 @@ func appUpdateRow(m *Model) ggui.Widget {
 		case u.Available():
 			text = tr("GVX Desktop %s is available.", u.Name()) + " " + appUpdateText(u)
 			row = append(row, appUpdateButton(m, u, ui.ButtonSmall))
-			if u.Command != "" && u.Install.Method != appupdate.Homebrew {
+			if u.Command != "" {
 				more = append(more, ui.CodeBlock(u.Command).Small().CopyButton(true))
 			}
 		default:

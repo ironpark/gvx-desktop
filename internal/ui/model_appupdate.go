@@ -665,7 +665,7 @@ func appUpdateText(u AppUpdate) string {
 		}
 		return this + tr("It downloads now and goes in place when the app restarts.")
 	case appupdate.Homebrew:
-		return this + tr("Homebrew installed this copy: run %s in a terminal, then open the app again.", u.Command)
+		return this + tr("Homebrew installed this copy: run the command in a terminal, then open the app again.")
 	case appupdate.Chocolatey:
 		return this + tr("Chocolatey installed this copy: quit the app and update it from a terminal opened as administrator.")
 	case appupdate.Deb, appupdate.RPM:

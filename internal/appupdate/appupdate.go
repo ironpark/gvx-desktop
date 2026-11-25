@@ -52,11 +52,15 @@ var appcastURL = AppcastURL
 // start of its release files' names.
 const Package = "gvx-desktop"
 
-// homebrewCommand updates the cask. brew update comes first: on its own,
-// Homebrew refreshes a third-party tap only once a day
+// homebrewCask is the app's cask by its full name, with its tap: the name
+// it is installed by.
+const homebrewCask = "ironpark/tap/" + Package
+
+// homebrewCommand updates the cask, one command a line. brew update comes
+// first: on its own, Homebrew refreshes a third-party tap only once a day
 // (HOMEBREW_AUTO_UPDATE_SECS), so brew upgrade alone may not know the
 // release yet.
-const homebrewCommand = "brew update && brew upgrade --cask " + Package
+const homebrewCommand = "brew update\nbrew upgrade --cask " + homebrewCask
 
 // Release is a published version of the app.
 type Release = ghrelease.Release
@@ -146,7 +150,8 @@ const (
 	// from the tarball, in a folder this user may write to: the new
 	// program goes in its place, and the app starts again.
 	Program
-	// Homebrew is the cask's: brew update && brew upgrade --cask gvx-desktop.
+	// Homebrew is the cask's: brew update, then
+	// brew upgrade --cask ironpark/tap/gvx-desktop.
 	Homebrew
 	// Chocolatey is the package's: choco upgrade gvx-desktop.
 	Chocolatey

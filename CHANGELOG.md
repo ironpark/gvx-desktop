@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- The update notice for a Homebrew install gives `brew update` and `brew upgrade --cask ironpark/tap/gvx-desktop` as two commands, with the cask's full tap name, as the README does. The banner no longer puts the command in its sentence: **Copy command** copies both lines, and **Settings** shows them in a code block, as it does for the other package managers.
+
 ## [0.11.2] - 2026-11-26
 
 ### Changed
