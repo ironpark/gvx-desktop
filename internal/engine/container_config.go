@@ -571,7 +571,23 @@ type mountPlanOptions struct {
 	unixForward  bool
 	dockerSocket string
 	sshAuthSock  string
+	bindSymlinks bool
 	volumesFrom  []plannedMount
+}
+
+// bindSymlinkMode returns sandbox.SymlinksContained for existing host
+// directory bind mounts when opts.bindSymlinks is enabled. Regular files,
+// missing paths (which -v creates automatically), and paths containing commas
+// stay on the default mode so rungvx never rejects them.
+func bindSymlinkMode(src, dst string, opts mountPlanOptions) string {
+	if !opts.bindSymlinks || strings.Contains(src, ",") || strings.Contains(dst, ",") {
+		return ""
+	}
+	fi, err := os.Stat(src)
+	if err != nil || !fi.IsDir() {
+		return ""
+	}
+	return sandbox.SymlinksContained
 }
 
 // resolveVolumesFrom resolves HostConfig.VolumesFrom entries ("<container>[:ro|:rw]")
@@ -634,6 +650,7 @@ func resolveVolumesFrom(specs []string, lookup func(string) (Container, error), 
 						Source:   mp.Source,
 						Target:   dst,
 						ReadOnly: ro,
+						Symlinks: bindSymlinkMode(mp.Source, dst, opts),
 					}
 				}
 				out = append(out, pm)
@@ -793,6 +810,7 @@ func planMountsWithOptions(hc HostConfig, cfg ContainerConfig, opts mountPlanOpt
 					Source:   src,
 					Target:   dst,
 					ReadOnly: ro,
+					Symlinks: bindSymlinkMode(src, dst, opts),
 				}
 			}
 			planned = append(planned, pm)
@@ -871,6 +889,7 @@ func planMountsWithOptions(hc HostConfig, cfg ContainerConfig, opts mountPlanOpt
 					Source:   m.Source,
 					Target:   dst,
 					ReadOnly: m.ReadOnly,
+					Symlinks: bindSymlinkMode(m.Source, dst, opts),
 				}
 			}
 			planned = append(planned, pm)

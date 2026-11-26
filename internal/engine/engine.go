@@ -80,6 +80,10 @@ type Config struct {
 	// explicit host LAN IP). When nil or returning false, all published ports
 	// bind 127.0.0.1 only.
 	AllowLANPorts func() bool
+	// BindSymlinks, when set and returning true, enables rungvx v0.26+
+	// symlinks=contained on existing host directory bind mounts so safe
+	// relative symlinks created by containers appear on macOS and Linux hosts.
+	BindSymlinks func() bool
 	// Logf, when set, traces every request and what the engine does.
 	Logf func(format string, args ...any)
 }
@@ -346,6 +350,10 @@ func (e *Engine) logf(format string, args ...any) {
 
 func (e *Engine) allowLANPorts() bool {
 	return e.cfg.AllowLANPorts != nil && e.cfg.AllowLANPorts()
+}
+
+func (e *Engine) bindSymlinks() bool {
+	return e.cfg.BindSymlinks != nil && e.cfg.BindSymlinks()
 }
 
 func (e *Engine) sshAuthSock() string {

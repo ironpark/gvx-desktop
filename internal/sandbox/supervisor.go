@@ -452,6 +452,9 @@ func checkSpecFeatures(spec Spec, feat rungv.Features) error {
 	if strings.TrimSpace(spec.AutoPublishAddr) != "" && !feat.AutoPublishAddr {
 		return errors.New("Auto-publish bind address (--auto-publish-addr) requires rungvx v0.21 or later.")
 	}
+	if spec.UsesBindSymlinks() && !feat.BindSymlinks {
+		return errors.New("Host symbolic links in bind mounts (symlinks=contained) require rungvx v0.26 or later.")
+	}
 	return nil
 }
 

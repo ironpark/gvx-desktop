@@ -1027,6 +1027,12 @@ func (m *Model) CheckKubeconfig() {
 
 // ---- Settings -----------------------------------------------------------
 
+// SetDockerBindSymlinks toggles opt-in contained host symbolic links
+// (symlinks=contained, rungvx v0.26+) for Sandbox Engine bind mounts.
+func (m *Model) SetDockerBindSymlinks(on bool) {
+	m.UpdateSettings(func(s *store.Settings) { s.DockerBindSymlinks = on })
+}
+
 // UpdateSettings applies and stores a change of the settings.
 func (m *Model) UpdateSettings(fn func(*store.Settings)) {
 	s := ggui.Peek(m.Settings)
@@ -1034,6 +1040,7 @@ func (m *Model) UpdateSettings(fn func(*store.Settings)) {
 	fn(&s)
 	m.dockerExposeLAN.Store(s.DockerExposeLAN)
 	m.dockerSSHAgent.Store(s.DockerSSHAgent)
+	m.dockerBindSymlinks.Store(s.DockerBindSymlinks)
 	m.developerMode.Store(s.DeveloperMode)
 	m.sandboxEngineMode.Store(s.SandboxEngine)
 	if ggui.Peek(m.DockerExposeLAN) != s.DockerExposeLAN {
@@ -1041,6 +1048,9 @@ func (m *Model) UpdateSettings(fn func(*store.Settings)) {
 	}
 	if ggui.Peek(m.DockerSSHAgent) != s.DockerSSHAgent {
 		m.DockerSSHAgent.Set(s.DockerSSHAgent)
+	}
+	if ggui.Peek(m.DockerBindSymlinks) != s.DockerBindSymlinks {
+		m.DockerBindSymlinks.Set(s.DockerBindSymlinks)
 	}
 	m.Settings.Set(s)
 	if err := m.store.SaveSettings(s); err != nil {
@@ -1160,6 +1170,7 @@ type Draft struct {
 	Volumes, Binds, Tmpfs    string
 	Workspace                string
 	WorkspaceRO              bool
+	WorkspaceSymlinks        bool
 	RootfsVolume             string
 	Memory, CPUs             string
 	Network, WGConf          string
@@ -1185,7 +1196,7 @@ func DraftFrom(s sandbox.Spec) Draft {
 		ID: s.ID, Name: s.Name, Image: s.Image, Command: s.Command,
 		Entrypoint: s.Entrypoint, SetEntrypoint: s.SetEntrypoint,
 		Ports: strings.Join(s.Ports, "\n"), UnixForwards: strings.Join(s.UnixForwards, "\n"), Env: strings.Join(s.Env, "\n"),
-		Workspace: s.Workspace, WorkspaceRO: s.WorkspaceRO, RootfsVolume: s.RootfsVolume,
+		Workspace: s.Workspace, WorkspaceRO: s.WorkspaceRO, WorkspaceSymlinks: s.WorkspaceSymlinks == sandbox.SymlinksContained, RootfsVolume: s.RootfsVolume,
 		Memory: s.Memory, CPUs: s.CPUs, Network: s.Network, WGConf: s.WGConf, IsolateLAN: s.IsolateLAN,
 		NetTX: formatBandwidthBPS(s.NetTXBPS), NetRX: formatBandwidthBPS(s.NetRXBPS),
 		NATPolicyFile: s.NATPolicyFile, DynamicPortAddrs: strings.Join(s.DynamicPortAddrs, "\n"),
@@ -1210,7 +1221,7 @@ func DraftFrom(s sandbox.Spec) Draft {
 		case sandbox.MountVolume:
 			vols = append(vols, mountLine(mt.Source, mt.Target, mt.ReadOnly))
 		case sandbox.MountBind:
-			binds = append(binds, mountLine(mt.Source, mt.Target, mt.ReadOnly))
+			binds = append(binds, bindMountLine(mt.Source, mt.Target, mt.ReadOnly, mt.Symlinks))
 		case sandbox.MountTmpfs:
 			line := mt.Target
 			var opts []string
@@ -1236,6 +1247,55 @@ func mountLine(src, dst string, ro bool) string {
 		l += ":ro"
 	}
 	return l
+}
+
+func bindMountLine(src, dst string, ro bool, symlinks string) string {
+	l := src + ":" + dst
+	var opts []string
+	if ro {
+		opts = append(opts, "ro")
+	}
+	if symlinks != "" {
+		opts = append(opts, "symlinks="+symlinks)
+	}
+	if len(opts) > 0 {
+		l += ":" + strings.Join(opts, ",")
+	}
+	return l
+}
+
+func parseBindMount(line string) (src, dst string, ro bool, symlinks string, err error) {
+	i := strings.LastIndex(line, ":/")
+	if i <= 0 {
+		return "", "", false, "", fmt.Errorf("mount %q: write HOST:/guest/path[:ro][,symlinks=contained]", line)
+	}
+	src = line[:i]
+	rest := line[i+1:]
+	dst, opts, hasOpts := strings.Cut(rest, ":")
+	if !hasOpts {
+		return src, dst, false, "", nil
+	}
+	for opt := range strings.SplitSeq(opts, ",") {
+		opt = strings.TrimSpace(opt)
+		if opt == "" {
+			continue
+		}
+		switch {
+		case opt == "ro":
+			ro = true
+		case opt == "rw":
+			ro = false
+		case strings.HasPrefix(opt, "symlinks="):
+			mode := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(opt, "symlinks=")))
+			if mode != sandbox.SymlinksVirtual && mode != sandbox.SymlinksContained {
+				return "", "", false, "", fmt.Errorf("mount %q: unsupported symlinks mode %q (use virtual or contained)", line, mode)
+			}
+			symlinks = mode
+		default:
+			return "", "", false, "", fmt.Errorf("mount %q: unknown bind option %q (use ro, rw, or symlinks=virtual|contained)", line, opt)
+		}
+	}
+	return src, dst, ro, symlinks, nil
 }
 
 func lines(s string) []string {
@@ -1433,6 +1493,9 @@ func (d Draft) Spec() (sandbox.Spec, error) {
 	if d.Pull != "missing" {
 		s.Pull = d.Pull
 	}
+	if s.Workspace != "" && d.WorkspaceSymlinks {
+		s.WorkspaceSymlinks = sandbox.SymlinksContained
+	}
 	for _, l := range lines(d.Volumes) {
 		src, dst, ro, err := parseMount(l)
 		if err != nil {
@@ -1441,11 +1504,11 @@ func (d Draft) Spec() (sandbox.Spec, error) {
 		s.Mounts = append(s.Mounts, sandbox.Mount{Type: sandbox.MountVolume, Source: src, Target: dst, ReadOnly: ro})
 	}
 	for _, l := range lines(d.Binds) {
-		src, dst, ro, err := parseMount(l)
+		src, dst, ro, sym, err := parseBindMount(l)
 		if err != nil {
 			return s, err
 		}
-		s.Mounts = append(s.Mounts, sandbox.Mount{Type: sandbox.MountBind, Source: src, Target: dst, ReadOnly: ro})
+		s.Mounts = append(s.Mounts, sandbox.Mount{Type: sandbox.MountBind, Source: src, Target: dst, ReadOnly: ro, Symlinks: sym})
 	}
 	for _, l := range lines(d.Tmpfs) {
 		target, opts, _ := strings.Cut(l, ":")

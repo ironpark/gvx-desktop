@@ -113,6 +113,11 @@ type Settings struct {
 	// at /run/host-services/ssh-auth.sock via rungv v0.21+ --unix-forward
 	// (opt-in; defaults to false).
 	DockerSSHAgent bool `json:"docker_ssh_agent,omitempty"`
+	// DockerBindSymlinks enables rungvx v0.26+ hostfs symlinks=contained on
+	// directory bind mounts in Sandbox Engine mode so safe relative symlinks
+	// created by containers appear as native host symlinks on macOS and Linux
+	// (opt-in; defaults to false).
+	DockerBindSymlinks bool `json:"docker_bind_symlinks,omitempty"`
 	// LocalRegistry controls the built-in OCI image registry on 127.0.0.1:5001:
 	// "auto" (default: starts automatically when Docker or Kubernetes is used),
 	// "on" (always running), or "off" (disabled).

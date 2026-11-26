@@ -140,6 +140,7 @@ func (m *Model) initDockerProxy(dataDir string) {
 		DockerSocket:     recipes.DockerSocket(),
 		AllowLANPorts:    m.dockerExposeLAN.Load,
 		SSHAuthSock:      m.sandboxSSHAuthSock,
+		BindSymlinks:     m.dockerBindSymlinks.Load,
 	})
 	ggui.OnCleanup(m.CloseDockerProxy)
 }

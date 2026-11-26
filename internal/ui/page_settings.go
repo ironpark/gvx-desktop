@@ -177,14 +177,14 @@ func rungvSettings(m *Model, path, cache, volume *ggui.StateValue[string]) ggui.
 			browseFile(m, path, func(v string) { m.UpdateSettings(func(s *storeSettings) { s.RungvPath = v }) })
 		}).Outline(),
 	).Gap(8))
-	cacheField := settingField(tr("Layer cache directory"), tr("Passed as -cache-dir. Named volumes then live in its volumes folder, and the volume directory does not apply."), widget.Row(
+	cacheField := settingField(tr("Layer cache directory"), tr("Passed as -cache-dir. Named volumes default to its volumes folder unless a volume directory is set (rungvx v0.24+)."), widget.Row(
 		widget.Expanded(ui.TextField(cache).Placeholder(tr("rungvx's default")).Name(tr("Layer cache directory")).
 			OnCommit(func(v string) { m.UpdateSettings(func(s *storeSettings) { s.CacheDir = strings.TrimSpace(v) }) })),
 		ui.Button(tr("Browse…"), func() {
 			browseFolder(m, cache, func(v string) { m.UpdateSettings(func(s *storeSettings) { s.CacheDir = v }) })
 		}).Outline(),
 	).Gap(8))
-	volumeField := settingField(tr("Volume directory"), tr("Passed to rungvx as GVX_VOLUME_DIR, which applies only while no layer cache directory is set. Keep it out of cache folders: macOS empties ~/Library/Caches when the disk runs low."), widget.Row(
+	volumeField := settingField(tr("Volume directory"), tr("Passed as -volume-dir on rungvx v0.24+ (works alongside a custom layer cache directory), or as GVX_VOLUME_DIR on earlier builds. Keep it out of cache folders: macOS empties ~/Library/Caches when the disk runs low."), widget.Row(
 		widget.Expanded(ui.TextField(volume).Placeholder(tr("rungvx's default")).Name(tr("Volume directory")).
 			OnCommit(func(v string) { m.UpdateSettings(func(s *storeSettings) { s.VolumeDir = strings.TrimSpace(v) }) })),
 		ui.Button(tr("Browse…"), func() {
@@ -288,9 +288,12 @@ func engineFacts(m *Model) ggui.Widget {
 			kvText(tr("Layer cache"), e.Info.LayerCacheDir),
 			kvText(tr("Volumes"), e.Info.VolumeDir),
 		}
-		if note := volumeDirNote(e, ggui.Peek(m.Settings)); note != nil {
-			rows = append(rows, note)
-		}
+		rows = append(rows, ggui.View(m.RungvFeatures, func(f rungv.Features) ggui.Widget {
+			if note := volumeDirNote(e, ggui.Peek(m.Settings), f.VolumeDirFlag); note != nil {
+				return note
+			}
+			return widget.Box()
+		}))
 		rows = append(rows, widget.Padding(widget.Row(actions...).Gap(8), 6, 0, 0, 0))
 		return widget.Column(rows...).Gap(8).Stretch()
 	})
@@ -298,9 +301,9 @@ func engineFacts(m *Model) ggui.Widget {
 
 // volumeDirNote shows the warning of volumeDirWarning for the engine e and the
 // settings set, or returns nil when there is none.
-func volumeDirNote(e Engine, set storeSettings) ggui.Widget {
+func volumeDirNote(e Engine, set storeSettings, hasVolumeDirFlag bool) ggui.Widget {
 	home, _ := os.UserHomeDir()
-	title, body := volumeDirWarning(e.Info.OS, home, e.Info.VolumeDir, set.CacheDir, set.VolumeDir)
+	title, body := volumeDirWarning(e.Info.OS, home, e.Info.VolumeDir, set.CacheDir, set.VolumeDir, hasVolumeDirFlag)
 	if title == "" {
 		return nil
 	}
@@ -310,23 +313,27 @@ func volumeDirNote(e Engine, set storeSettings) ggui.Widget {
 // volumeDirWarning explains why the named volumes that rungvx reports in dir
 // are not where the settings put them, or can be lost: rungvx ignored the
 // volume directory setting, or dir lies in a cache folder that the host may
-// purge. rungvx reads GVX_VOLUME_DIR only when no -cache-dir is given, so a
-// layer cache setting keeps the volumes in its volumes folder, and the advice
-// then names that setting. It returns empty strings when nothing applies.
-func volumeDirWarning(goos, home, dir, cacheSetting, volumeSetting string) (title, body string) {
+// purge. On rungvx v0.24+ (-volume-dir), a custom volume directory works
+// alongside -cache-dir; earlier builds only read GVX_VOLUME_DIR when no
+// -cache-dir is given. It returns empty strings when nothing applies.
+func volumeDirWarning(goos, home, dir, cacheSetting, volumeSetting string, hasVolumeDirFlag bool) (title, body string) {
 	if dir == "" {
 		return "", ""
 	}
 	cacheSet := strings.TrimSpace(cacheSetting) != ""
 	if want := rungv.ExpandHome(strings.TrimSpace(volumeSetting)); want != "" && filepath.Clean(want) != filepath.Clean(dir) {
-		if cacheSet {
+		if cacheSet && !hasVolumeDirFlag {
 			return tr("Volume directory not applied"),
-				tr("A layer cache directory is set, so rungvx keeps volumes in %s. Clear the layer cache directory setting to use the volume directory.", dir)
+				tr("A layer cache directory is set, so this rungvx keeps volumes in %s. Clear the layer cache directory setting, or update rungvx to v0.24+ to use -volume-dir.", dir)
 		}
 		return tr("Volume directory not applied"),
 			tr("This rungvx does not read GVX_VOLUME_DIR and keeps volumes in %s. Update rungvx to use the setting.", dir)
 	}
 	if rungv.CacheVolumeDir(goos, home, dir) {
+		if cacheSet && hasVolumeDirFlag {
+			return tr("Volumes are in a cache folder"),
+				tr("macOS empties ~/Library/Caches when the disk runs low, and named volumes there lose their data. Set a volume directory outside it, or move the layer cache directory out of it.")
+		}
 		if cacheSet {
 			return tr("Volumes are in a cache folder"),
 				tr("macOS empties ~/Library/Caches when the disk runs low, and named volumes there lose their data. Move the layer cache directory out of it.")
@@ -628,6 +635,7 @@ func dockerSettings(m *Model) ggui.Widget {
 
 	exposeLAN := ggui.Bind(m.DockerExposeLAN.Get, m.SetDockerExposeLAN)
 	sshAgent := ggui.Bind(m.DockerSSHAgent.Get, m.SetDockerSSHAgent)
+	bindSymlinks := ggui.Bind(m.DockerBindSymlinks.Get, m.SetDockerBindSymlinks)
 
 	apiRows := []ggui.Widget{
 		widget.Row(
@@ -674,6 +682,11 @@ func dockerSettings(m *Model) ggui.Widget {
 		tr("Relays this machine's SSH_AUTH_SOCK to /run/host-services/ssh-auth.sock for containers that mount it. Requires rungvx v0.21+."),
 		ui.Switch(sshAgent, "").Name(tr("Forward host SSH agent")),
 	)
+	symlinkRow := settingRow(
+		tr("Create host symbolic links in bind mounts"),
+		tr("Materializes safe relative symbolic links inside container bind mounts on macOS and Linux (symlinks=contained) so host tools and IDEs see them. Requires rungvx v0.26+ in Sandbox Engine mode."),
+		ui.Switch(bindSymlinks, "").Name(tr("Create host symbolic links in bind mounts")),
+	)
 	cfgRow := dockerConfigField(m)
 
 	hasBundled := ggui.Map(m.BundledDocker, func(s BundledDockerState) bool { return s.Available })
@@ -682,7 +695,7 @@ func dockerSettings(m *Model) ggui.Widget {
 		if avail {
 			rows = append(rows, bundledRow)
 		}
-		rows = append(rows, apiCol, sharedRow, lanRow, sshRow, cfgRow)
+		rows = append(rows, apiCol, sharedRow, lanRow, sshRow, symlinkRow, cfgRow)
 		return settingsGroup(dockerIcon, "Docker", rows...)
 	})
 }

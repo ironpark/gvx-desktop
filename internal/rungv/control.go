@@ -71,6 +71,12 @@ type Features struct {
 	// RestoreLiveMounts: restore takes --attach-bind and --serve to reattach
 	// checkpointed dynamic bind and rpcfs mounts.
 	RestoreLiveMounts bool
+	// VolumeDirFlag: run/restore/volume/info/system/mount add take -volume-dir
+	// (rungvx v0.24+), which overrides -cache-dir and GVX_VOLUME_DIR.
+	VolumeDirFlag bool
+	// BindSymlinks: --mount type=bind supports symlinks=virtual|contained
+	// (rungvx v0.26+).
+	BindSymlinks bool
 }
 
 // Features reports what this rungv binary can do. A zero Features (v0.19,
@@ -89,6 +95,8 @@ func (c *Client) Features(ctx context.Context) Features {
 		AutoPublishAddr:  c.HasRunFlag(ctx, "auto-publish-addr"),
 		NetQoS:           c.HasRunFlag(ctx, "net-tx-bps"),
 		NATPolicy:        c.HasRunFlag(ctx, "nat-policy-file"),
+		VolumeDirFlag:    c.HasRunFlag(ctx, "volume-dir"),
+		BindSymlinks:     c.HasRunUsage(ctx, "symlinks="),
 	}
 	if f.Control && f.KeepBlobs {
 		f.RestoreLiveMounts = c.HasRestoreFlag(ctx, "attach-bind") && c.HasRestoreFlag(ctx, "serve")
@@ -737,8 +745,13 @@ func (c *Client) AddMount(ctx context.Context, t Target, o MountAddOptions) erro
 	if size != "" {
 		args = append(args, "--size", size)
 	}
-	if c.CacheDir != "" && kind == "volume" {
-		args = append(args, "-cache-dir", c.CacheDir)
+	if kind == "volume" {
+		if c.CacheDir != "" {
+			args = append(args, "-cache-dir", c.CacheDir)
+		}
+		if c.VolumeDir != "" && c.HasRunFlag(ctx, "volume-dir") {
+			args = append(args, "-volume-dir", c.VolumeDir)
+		}
 	}
 	_, err := c.output(ctx, args...)
 	return err

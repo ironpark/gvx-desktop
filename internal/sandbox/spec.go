@@ -32,13 +32,20 @@ const (
 	MountTmpfs  MountType = "tmpfs"  // memory-backed
 )
 
+// SymlinkMode values for hostfs directory bind mounts (rungvx v0.26+).
+const (
+	SymlinksVirtual   = "virtual"   // store guest symlinks only in .gvx_meta (default)
+	SymlinksContained = "contained" // materialize safe relative symlinks on macOS/Linux hosts
+)
+
 // Mount is one mount of a sandbox.
 type Mount struct {
 	Type     MountType `json:"type"`
 	Source   string    `json:"source,omitempty"` // volume name, image path, or host path
 	Target   string    `json:"target"`
 	ReadOnly bool      `json:"readOnly,omitempty"`
-	Size     string    `json:"size,omitempty"` // tmpfs size, such as 64m
+	Size     string    `json:"size,omitempty"`     // tmpfs size, such as 64m
+	Symlinks string    `json:"symlinks,omitempty"` // bind mounts only: "", "virtual", or "contained" (rungvx v0.26+)
 }
 
 // Spec is everything a sandbox starts with. Because a gvx sandbox locks its
@@ -60,10 +67,11 @@ type Spec struct {
 	// GUEST_PATH=HOST_SOCKET[,uid=N,gid=N,mode=0600].
 	UnixForwards []string `json:"unixForwards,omitempty"`
 
-	Mounts       []Mount `json:"mounts,omitempty"`
-	Workspace    string  `json:"workspace,omitempty"`
-	WorkspaceRO  bool    `json:"workspaceRO,omitempty"`
-	RootfsVolume string  `json:"rootfsVolume,omitempty"`
+	Mounts            []Mount `json:"mounts,omitempty"`
+	Workspace         string  `json:"workspace,omitempty"`
+	WorkspaceRO       bool    `json:"workspaceRO,omitempty"`
+	WorkspaceSymlinks string  `json:"workspaceSymlinks,omitempty"` // "", "virtual", or "contained" (rungvx v0.26+)
+	RootfsVolume      string  `json:"rootfsVolume,omitempty"`
 
 	Memory string `json:"memory,omitempty"` // 512m, 2g
 	CPUs   string `json:"cpus,omitempty"`   // 1.5
@@ -194,6 +202,14 @@ func (s Spec) Validate() error {
 	targets := map[string]bool{}
 	if s.Workspace != "" {
 		targets["/workspace"] = true
+	}
+	if err := validateSymlinkMode(s.WorkspaceSymlinks); err != nil {
+		return fmt.Errorf("Workspace symlinks: %w", err)
+	}
+	if s.Workspace != "" && s.WorkspaceSymlinks == SymlinksContained {
+		if strings.Contains(rungv.ExpandHome(s.Workspace), ",") {
+			return errors.New("Workspace path cannot contain a comma when host symbolic links are enabled.")
+		}
 	}
 	for _, m := range s.Mounts {
 		if err := m.validate(); err != nil {
@@ -349,6 +365,29 @@ func ValidateUnixForward(spec string) error {
 	return nil
 }
 
+func validateSymlinkMode(mode string) error {
+	switch mode {
+	case "", SymlinksVirtual, SymlinksContained:
+		return nil
+	default:
+		return fmt.Errorf("unsupported symlink mode %q (use %q or %q).", mode, SymlinksVirtual, SymlinksContained)
+	}
+}
+
+// UsesBindSymlinks reports whether the spec configures hostfs symlink mode
+// options that require rungvx v0.26+ (--mount ...,symlinks=...).
+func (s Spec) UsesBindSymlinks() bool {
+	if s.Workspace != "" && s.WorkspaceSymlinks == SymlinksContained {
+		return true
+	}
+	for _, m := range s.Mounts {
+		if m.Type == MountBind && m.Symlinks != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (m Mount) validate() error {
 	if !strings.HasPrefix(m.Target, "/") || m.Target == "/" {
 		return fmt.Errorf("Mount target %q must be an absolute guest path other than /.", m.Target)
@@ -357,6 +396,12 @@ func (m Mount) validate() error {
 		if (m.Target == p || strings.HasPrefix(m.Target, p+"/")) && !strings.HasPrefix(m.Target, "/dev/shm") {
 			return fmt.Errorf("Mount target %s is reserved by the guest kernel.", m.Target)
 		}
+	}
+	if err := validateSymlinkMode(m.Symlinks); err != nil {
+		return fmt.Errorf("Mount at %s: %w", m.Target, err)
+	}
+	if m.Symlinks != "" && m.Type != MountBind {
+		return fmt.Errorf("Mount at %s: symlink mode applies to bind mounts only.", m.Target)
 	}
 	switch m.Type {
 	case MountVolume:
@@ -369,6 +414,9 @@ func (m Mount) validate() error {
 	case MountBind:
 		if m.Source == "" {
 			return fmt.Errorf("The bind mount at %s needs a host path.", m.Target)
+		}
+		if m.Symlinks != "" && (strings.Contains(rungv.ExpandHome(m.Source), ",") || strings.Contains(m.Target, ",")) {
+			return fmt.Errorf("Bind mount at %s: paths cannot contain a comma when symlinks mode is set.", m.Target)
 		}
 	case MountTmpfs:
 	default:
@@ -689,9 +737,13 @@ func (s Spec) flags(p Paths, restore bool, skipMounts map[string]bool) []string 
 		}
 	}
 	if s.Workspace != "" && !skipMounts["/workspace"] {
-		add("-workspace", rungv.ExpandHome(s.Workspace))
-		if s.WorkspaceRO {
-			add("-ro")
+		if s.WorkspaceSymlinks == SymlinksContained {
+			add(bindMountArgs(rungv.ExpandHome(s.Workspace), "/workspace", s.WorkspaceRO, s.WorkspaceSymlinks)...)
+		} else {
+			add("-workspace", rungv.ExpandHome(s.Workspace))
+			if s.WorkspaceRO {
+				add("-ro")
+			}
 		}
 	}
 	if s.RootfsVolume != "" {
@@ -749,8 +801,23 @@ func (m Mount) args() []string {
 		}
 		return []string{"-v", volumeSpec(m.Source, m.Target, m.ReadOnly)}
 	default:
-		return []string{"-v", volumeSpec(rungv.ExpandHome(m.Source), m.Target, m.ReadOnly)}
+		src := rungv.ExpandHome(m.Source)
+		if m.Symlinks != "" {
+			return bindMountArgs(src, m.Target, m.ReadOnly, m.Symlinks)
+		}
+		return []string{"-v", volumeSpec(src, m.Target, m.ReadOnly)}
 	}
+}
+
+func bindMountArgs(src, dst string, ro bool, symlinks string) []string {
+	v := "type=bind,src=" + src + ",dst=" + dst
+	if ro {
+		v += ",readonly"
+	}
+	if symlinks != "" {
+		v += ",symlinks=" + symlinks
+	}
+	return []string{"--mount", v}
 }
 
 func volumeSpec(src, dst string, ro bool) string {

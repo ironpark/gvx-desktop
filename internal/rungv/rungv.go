@@ -142,9 +142,10 @@ func ExpandHome(p string) string {
 type Client struct {
 	Path     string
 	CacheDir string // optional -cache-dir for every command that takes it
-	// VolumeDir is the optional directory of named volumes, given to every
-	// command as VolumeDirEnv. rungv reads it only when no -cache-dir is
-	// given, so CacheDir/volumes wins while CacheDir is set.
+	// VolumeDir is the optional directory of named volumes. On rungvx v0.24+,
+	// Command passes it as -volume-dir (which overrides -cache-dir) for
+	// commands that accept it, and always sets VolumeDirEnv for compatibility
+	// with earlier builds.
 	VolumeDir string
 }
 
@@ -183,27 +184,49 @@ var cacheFlagCommands = map[string]bool{
 	"volume": true, "system": true, "info": true,
 }
 
-// Args returns the full argument vector for a command, adding -cache-dir
-// where the command accepts it.
-func (c *Client) Args(args ...string) []string {
-	if c.CacheDir == "" || len(args) == 0 || !cacheFlagCommands[args[0]] {
+// volumeFlagCommands take -volume-dir (rungvx v0.24+). mount add is handled in
+// AddMount because -volume-dir applies only to volume mounts, not mount ls/rm.
+var volumeFlagCommands = map[string]bool{
+	"run": true, "restore": true, "volume": true, "system": true, "info": true,
+}
+
+func (c *Client) argsFor(args []string, withVolumeDir bool) []string {
+	if len(args) == 0 {
 		return args
 	}
-	out := make([]string, 0, len(args)+2)
+	addCache := c.CacheDir != "" && cacheFlagCommands[args[0]]
+	addVol := withVolumeDir && c.VolumeDir != "" && volumeFlagCommands[args[0]]
+	if !addCache && !addVol {
+		return args
+	}
+	out := make([]string, 0, len(args)+4)
 	// Group commands take the flag after their verb.
 	n := 1
 	if (args[0] == "image" || args[0] == "volume" || args[0] == "system") && len(args) > 1 {
 		n = 2
 	}
 	out = append(out, args[:n]...)
-	out = append(out, "-cache-dir", c.CacheDir)
+	if addCache {
+		out = append(out, "-cache-dir", c.CacheDir)
+	}
+	if addVol {
+		out = append(out, "-volume-dir", c.VolumeDir)
+	}
 	return append(out, args[n:]...)
 }
 
-// Command builds an exec.Cmd for rungv with args. It sets VolumeDirEnv when
-// VolumeDir is set, and leaves the environment of the app otherwise.
+// Args returns the full argument vector for a command, adding -cache-dir
+// where the command accepts it.
+func (c *Client) Args(args ...string) []string {
+	return c.argsFor(args, false)
+}
+
+// Command builds an exec.Cmd for rungv with args. When VolumeDir is set, it
+// passes -volume-dir for commands that accept it on rungvx v0.24+ and also
+// sets VolumeDirEnv so older builds see it when CacheDir is unset.
 func (c *Client) Command(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, c.Path, c.Args(args...)...)
+	withVol := c.VolumeDir != "" && len(args) > 0 && volumeFlagCommands[args[0]] && c.HasRunFlag(ctx, "volume-dir")
+	cmd := exec.CommandContext(ctx, c.Path, c.argsFor(args, withVol)...)
 	if c.VolumeDir != "" {
 		cmd.Env = append(os.Environ(), VolumeDirEnv+"="+c.VolumeDir)
 	}
@@ -256,9 +279,9 @@ var (
 	restoreFlags sync.Map
 )
 
-func hasCommandFlag(ctx context.Context, cache *sync.Map, subcmd, binPath, name string) bool {
+func commandUsage(ctx context.Context, cache *sync.Map, subcmd, binPath string) (string, bool) {
 	if binPath == "" {
-		return false
+		return "", false
 	}
 	usage, ok := cache.Load(binPath)
 	if !ok {
@@ -269,20 +292,38 @@ func hasCommandFlag(ctx context.Context, cache *sync.Map, subcmd, binPath, name 
 		hideWindow(cmd)
 		out, err := cmd.CombinedOutput() // the usage may come with a failing exit
 		if ctx.Err() != nil {
-			return false
+			return "", false
 		}
 		if len(out) == 0 && errors.Is(err, os.ErrNotExist) {
-			return false
+			return "", false
 		}
 		usage = string(out)
 		cache.Store(binPath, usage)
 	}
-	for line := range strings.SplitSeq(usage.(string), "\n") {
+	return usage.(string), true
+}
+
+func hasCommandFlag(ctx context.Context, cache *sync.Map, subcmd, binPath, name string) bool {
+	usage, ok := commandUsage(ctx, cache, subcmd, binPath)
+	if !ok {
+		return false
+	}
+	for line := range strings.SplitSeq(usage, "\n") {
 		if f := strings.Fields(line); len(f) > 0 && f[0] == "-"+name && strings.HasPrefix(line, "  -") {
 			return true
 		}
 	}
 	return false
+}
+
+// HasRunUsage reports whether this rungv's run -help output contains substr.
+// The usage text is read once for each binary and shared with HasRunFlag.
+func (c *Client) HasRunUsage(ctx context.Context, substr string) bool {
+	if c == nil || substr == "" {
+		return false
+	}
+	usage, ok := commandUsage(ctx, &runFlags, "run", c.Path)
+	return ok && strings.Contains(usage, substr)
 }
 
 // HasRunFlag reports whether this rungv's run command takes the flag name,

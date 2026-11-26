@@ -1080,10 +1080,12 @@ func (e *Engine) containerCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Plan and validate mounts before creating any volumes.
+	feat := e.runner.Features()
 	mountOpts := mountPlanOptions{
-		unixForward:  !isMicroVM && e.runner.Features().UnixForward,
+		unixForward:  !isMicroVM && feat.UnixForward,
 		dockerSocket: e.cfg.DockerSocket,
 		sshAuthSock:  e.sshAuthSock(),
+		bindSymlinks: !isMicroVM && e.bindSymlinks() && feat.BindSymlinks,
 	}
 	if len(hc.VolumesFrom) > 0 {
 		inherited, err := resolveVolumesFrom(hc.VolumesFrom, e.lookup, mountOpts)

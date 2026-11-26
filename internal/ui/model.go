@@ -103,7 +103,8 @@ func (e Engine) Equal(o Engine) bool {
 		slices.Equal(e.Info.AvailableBackends, o.Info.AvailableBackends) &&
 		slices.Equal(e.Info.BackendWarnings, o.Info.BackendWarnings) &&
 		e.Info.HostLockdown == o.Info.HostLockdown && e.Info.Images == o.Info.Images &&
-		e.Info.Volumes == o.Info.Volumes && e.Info.LayerCacheDir == o.Info.LayerCacheDir
+		e.Info.Volumes == o.Info.Volumes && e.Info.LayerCacheDir == o.Info.LayerCacheDir &&
+		e.Info.VolumeDir == o.Info.VolumeDir
 }
 
 // Row is a sandbox with its runtime state, as the tables show it.
@@ -294,6 +295,8 @@ type Model struct {
 	DockerExposeLAN *ggui.StateValue[bool]
 	// DockerSSHAgent mirrors Settings.DockerSSHAgent for reactive UI bindings.
 	DockerSSHAgent *ggui.StateValue[bool]
+	// DockerBindSymlinks mirrors Settings.DockerBindSymlinks for reactive UI bindings.
+	DockerBindSymlinks *ggui.StateValue[bool]
 	// DockerLink and KubeLink are the contexts docker and kubectl on this
 	// machine reach the recipes' engines through.
 	DockerLink, KubeLink *Link
@@ -416,6 +419,7 @@ type Model struct {
 	engineLiveMounts                           atomic.Bool
 	dockerExposeLAN                            atomic.Bool
 	dockerSSHAgent                             atomic.Bool
+	dockerBindSymlinks                         atomic.Bool
 	sandboxEngine                              sandboxEngine // in-app Docker Engine API (*engine.Engine); tests may replace
 	sandboxEngineGen                           int
 	amd64Gen                                   int
@@ -574,6 +578,7 @@ func NewModel(st store.Store, dataDir string) *Model {
 		SandboxEngineStatus: ggui.State(SandboxEngineStatus{}),
 		DockerExposeLAN:     ggui.State(settings.DockerExposeLAN),
 		DockerSSHAgent:      ggui.State(settings.DockerSSHAgent),
+		DockerBindSymlinks:  ggui.State(settings.DockerBindSymlinks),
 		BundledDocker:       ggui.State(BundledDockerState{}).WithEqual(BundledDockerState.Equal),
 		RungvPath:           ggui.State(RungvPathState{}).WithEqual(RungvPathState.Equal),
 		ContainerQuery:      ggui.State(""),
@@ -682,6 +687,7 @@ func NewModel(st store.Store, dataDir string) *Model {
 	}
 	m.dockerExposeLAN.Store(settings.DockerExposeLAN)
 	m.dockerSSHAgent.Store(settings.DockerSSHAgent)
+	m.dockerBindSymlinks.Store(settings.DockerBindSymlinks)
 	m.developerMode.Store(settings.DeveloperMode)
 	m.sandboxEngineMode.Store(settings.SandboxEngine)
 	m.updateHostInfoSnapshot(settings, Engine{}, false)
@@ -1108,8 +1114,8 @@ func (m *Model) DetectEngine(then func(ok bool)) {
 			m.client = nil
 		}
 		m.clientMu.Unlock()
-		m.Engine.Set(r.e)
 		m.RungvFeatures.Set(r.features)
+		m.Engine.Set(r.e)
 		m.refreshRungvPathState()
 		ok := r.e.Path != "" && r.e.Err == ""
 		ready := ok && len(r.e.Info.AvailableBackends) > 0

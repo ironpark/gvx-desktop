@@ -182,12 +182,13 @@ func editorSheet(m *Model) ggui.Widget {
 			Help(tr("NAME:/guest/path[:ro]. Each named volume is one journaled ext4 image that persists; a source with a slash is an .ext4 file at that path.")),
 		ui.Field(tr("Bind mounts"), ui.TextField(str(func(x *Draft) *string { return &x.Binds })).Multiline().Lines(2).
 			Placeholder("~/src:/src\n~/app.conf:/etc/app.conf:ro").Name(tr("Bind mounts"))).
-			Help(tr("HOST:/guest/path[:ro]. A host directory or one file. The sandbox may only reach what is mounted.")),
+			Help(tr("HOST:/guest/path[:ro][,symlinks=contained]. A host directory or one file. Add symlinks=contained (rungvx v0.26+) to materialize safe relative symlinks on macOS and Linux. The sandbox may only reach what is mounted.")),
 		ui.Field(tr("Workspace"), widget.Row(
 			widget.Expanded(ui.TextField(workspace).Placeholder(tr("Folder mounted at /workspace")).Name(tr("Workspace folder"))),
 			ui.Button(tr("Browse…"), func() { browseFolder(m, workspace, nil) }).Outline(),
 		).Gap(8)),
 		ui.Switch(flag(func(x *Draft) *bool { return &x.WorkspaceRO }), tr("Mount the workspace read-only")).Small(),
+		ui.Switch(flag(func(x *Draft) *bool { return &x.WorkspaceSymlinks }), tr("Create host symbolic links in the workspace (rungvx v0.26+)")).Small(),
 		ui.Field(tr("Persistent root file system"), ui.TextField(str(func(x *Draft) *string { return &x.RootfsVolume })).Placeholder(tr("Volume name, or empty for memory")).Name(tr("Root file system volume"))).
 			Help(tr("Writes outside mounts go to memory and vanish at exit unless a root volume keeps them.")),
 		ui.Field(tr("Memory mounts (tmpfs)"), ui.TextField(str(func(x *Draft) *string { return &x.Tmpfs })).Multiline().Lines(1).
