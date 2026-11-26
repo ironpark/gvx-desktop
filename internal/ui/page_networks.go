@@ -94,7 +94,28 @@ func networksSection(m *Model) ggui.Widget {
 	count := ggui.Combine(rows, all, func(v, a []dockerapi.Network) string { return showing(len(v), len(a)) })
 	hasVisible := ggui.Map(rows, func(v []dockerapi.Network) bool { return len(v) > 0 })
 	selected := ggui.Bind(ggui.Map(m.Network, func(n dockerapi.Network) string { return n.ID }).Get, m.SelectNetwork)
-	table := ui.Table(rows, func(n dockerapi.Network) string { return n.ID },
+	netKey := func(n dockerapi.Network) string { return n.ID }
+	netLabel := func(n dockerapi.Network) string { return n.Name }
+	netCanSelect := func(n dockerapi.Network) (bool, string) {
+		if why := networkRemovable(n); why != "" {
+			return false, why
+		}
+		return true, ""
+	}
+	checked := newBulkSelection()
+	checkedItems := ggui.Combine(rows, checked, func(items []dockerapi.Network, sel map[string]bool) []dockerapi.Network {
+		return selectedItems(items, sel, netKey, netCanSelect)
+	}).WithEqual(nil)
+	checkedCount := ggui.Map(checkedItems, func(items []dockerapi.Network) int { return len(items) })
+	clearChecked := func() { clearSelection(checked) }
+	bulkRemove := ui.Button(tr("Remove…"), func() {
+		m.AskRemoveNetworks(ggui.Peek(checkedItems), clearChecked)
+	}).Destructive().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Trash, 13)).BindDisabled(ggui.Map(m.BusyOps, func(b map[string]bool) bool {
+		return b["net:bulk"]
+	}))
+	netToolbar := bulkToolbar(filterBar(m.NetworkQuery, tr("Filter by name, subnet or project"), count), checkedCount, clearChecked, bulkRemove)
+	table := ui.Table(rows, netKey,
+		selectCheckboxColumn(rows, checked, netKey, netLabel, netCanSelect),
 		ui.Col(tr("Name"), func(r ggui.Readable[dockerapi.Network]) ggui.Widget {
 			return ggui.View(r, func(n dockerapi.Network) ggui.Widget {
 				caption := n.ShortID()
@@ -156,7 +177,7 @@ func networksSection(m *Model) ggui.Widget {
 			})
 		}).W(84).Identified("actions"),
 	).BindSelected(selected).RowName(func(n dockerapi.Network) string { return n.Name }).RowHeight(48).MaxRows(6).
-		Toolbar(filterBar(m.NetworkQuery, tr("Filter by name, subnet or project"), count))
+		Toolbar(netToolbar)
 
 	filteredEmpty := ggui.If(ggui.Not(hasVisible), func() ggui.Widget {
 		return widget.Padding(widget.Row(

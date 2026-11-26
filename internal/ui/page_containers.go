@@ -174,18 +174,36 @@ func containersTable(m *Model) ggui.Widget {
 		}
 		return tr("All")
 	}).Outline().Size(ui.ButtonExtraSmall).Spacing(0).Name(tr("Status"))
-	toolbar := widget.Row(
+
+	visibleContainers := ggui.Derived(func() []dockerapi.Container {
+		return filterContainers(filterContainersByStatus(all.Get(), m.ContainerStatus.Get()), m.ContainerQuery.Get())
+	}).WithEqual(nil)
+	checked := newBulkSelection()
+	checkedItems := ggui.Combine(visibleContainers, checked, func(items []dockerapi.Container, sel map[string]bool) []dockerapi.Container {
+		return selectedItems(items, sel, func(c dockerapi.Container) string { return c.ID }, nil)
+	}).WithEqual(nil)
+	checkedCount := ggui.Map(checkedItems, func(items []dockerapi.Container) int { return len(items) })
+	canStartAny := ggui.Map(checkedItems, func(items []dockerapi.Container) bool { return len(projectTargets("start", items)) > 0 })
+	canStopAny := ggui.Map(checkedItems, func(items []dockerapi.Container) bool { return len(projectTargets("stop", items)) > 0 })
+	bulkBusy := ggui.Map(m.BusyOps, func(b map[string]bool) bool { return b["ctr:bulk"] })
+	clearChecked := func() { clearSelection(checked) }
+
+	mainToolbar := widget.Row(
 		widget.Expanded(filterBar(m.ContainerQuery, tr("Filter by name, image or project"), count)),
 		statusFilter,
 	).Gap(12).Align(widget.AlignCenter)
-	// Clicking a Compose head folds/unfolds it; clicking a container selects it.
-	selected := ggui.Bind(ggui.Map(m.Container, func(c dockerapi.Container) string { return c.ID }).Get, func(id string) {
-		if project, ok := strings.CutPrefix(id, composeKey("")); ok {
-			m.ToggleProject(project)
-			return
-		}
-		m.SelectContainer(id)
-	})
+	toolbar := bulkToolbar(mainToolbar, checkedCount, clearChecked,
+		ui.Button(tr("Start"), func() { m.BulkContainerAction("start", ggui.Peek(checkedItems), clearChecked) }).
+			Outline().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Play, 13)).
+			BindDisabled(ggui.Combine(canStartAny, bulkBusy, func(ok, busy bool) bool { return !ok || busy })),
+		ui.Button(tr("Stop"), func() { m.BulkContainerAction("stop", ggui.Peek(checkedItems), clearChecked) }).
+			Outline().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Square, 13)).
+			BindDisabled(ggui.Combine(canStopAny, bulkBusy, func(ok, busy bool) bool { return !ok || busy })),
+		ui.Button(tr("Remove…"), func() { m.AskRemoveContainers(ggui.Peek(checkedItems), clearChecked) }).
+			Destructive().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Trash, 13)).
+			BindDisabled(bulkBusy),
+	)
+
 	// cell builds a column's cell for a container's row, or with head for a
 	// project's head, which has nothing in the column without one. A row
 	// keeps its key, and so whether it is a head.
@@ -200,10 +218,87 @@ func containersTable(m *Model) ggui.Widget {
 			return ctr(ggui.Map(r, func(row containerRow) dockerapi.Container { return row.C }).WithEqual(dockerapi.Container.Equal))
 		}
 	}
+
+	// Header tri-state checkbox toggles all visible containers.
+	headerAll := ggui.Bind(
+		func() bool {
+			v := visibleContainers.Get()
+			c := checkedCount.Get()
+			return len(v) > 0 && c == len(v)
+		},
+		func(on bool) {
+			v := ggui.Peek(visibleContainers)
+			keys := make([]string, len(v))
+			for i, c := range v {
+				keys[i] = c.ID
+			}
+			setSelectionKeys(checked, keys, on)
+		},
+	)
+	headerInd := ggui.Combine(visibleContainers, checkedCount, func(v []dockerapi.Container, c int) bool {
+		return c > 0 && c < len(v)
+	})
+	selectCol := ui.Col("", cell(func(r ggui.Readable[dockerapi.Container]) ggui.Widget {
+		c := ggui.Peek(r)
+		id := c.ID
+		b := ggui.Bind(
+			func() bool { return checked.Get()[id] },
+			func(on bool) { toggleSelectionKey(checked, id, on) },
+		)
+		return quietTableCheckbox(ui.Checkbox(b, "").Name(tr("Select %s", c.Name())))
+	}, func(r ggui.Readable[containerRow]) ggui.Widget {
+		project := ggui.Peek(r).Project
+		type projSel struct {
+			total   int
+			checked int
+		}
+		ps := ggui.Combine(r, checked, func(row containerRow, sel map[string]bool) projSel {
+			var st projSel
+			for _, mem := range row.Members {
+				st.total++
+				if sel[mem.ID] {
+					st.checked++
+				}
+			}
+			return st
+		})
+		b := ggui.Bind(
+			func() bool {
+				st := ps.Get()
+				return st.total > 0 && st.checked == st.total
+			},
+			func(on bool) {
+				members := ggui.Peek(r).Members
+				keys := make([]string, len(members))
+				for i, mem := range members {
+					keys[i] = mem.ID
+				}
+				setSelectionKeys(checked, keys, on)
+			},
+		)
+		ind := ggui.Map(ps, func(st projSel) bool { return st.checked > 0 && st.checked < st.total })
+		return quietTableCheckbox(ui.Checkbox(b, "").BindIndeterminate(ind).Name(tr("Select %s", project)))
+	})).W(38).Center().Identified("select")
+	selectCol.Header = quietTableCheckbox(
+		ui.Checkbox(headerAll, "").
+			BindIndeterminate(headerInd).
+			BindDisabled(ggui.Map(visibleContainers, func(v []dockerapi.Container) bool { return len(v) == 0 })).
+			Name(tr("Select all")),
+	)
+
+	// Clicking a Compose head folds/unfolds it; clicking a container selects it.
+	selected := ggui.Bind(ggui.Map(m.Container, func(c dockerapi.Container) string { return c.ID }).Get, func(id string) {
+		if project, ok := strings.CutPrefix(id, composeKey("")); ok {
+			m.ToggleProject(project)
+			return
+		}
+		m.SelectContainer(id)
+	})
 	engine := engineSpecOf(m)
 	liveMounts := dockerLiveMountsOf(m)
 	// As tall as its rows up to six, as the sandboxes' table is.
 	return ui.Table(rows, containerRow.key,
+		selectCol,
 		ui.Col(tr("Status"), cell(func(r ggui.Readable[dockerapi.Container]) ggui.Widget {
 			return ggui.View(r, containerStatusLabel)
 		}, func(r ggui.Readable[containerRow]) ggui.Widget {

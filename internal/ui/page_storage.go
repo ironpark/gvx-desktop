@@ -265,6 +265,11 @@ func cachedImagesView(m *Model) ggui.Widget {
 		return out
 	}).WithEqual(nil)
 	visible := ggui.Combine(all, m.ImageQuery, filterCachedImages).WithEqual(nil)
+	checked := newBulkSelection()
+	checkedItems := ggui.Combine(visible, checked, func(rows []cachedImageRow, sel map[string]bool) []cachedImageRow {
+		return selectedItems(rows, sel, cachedImageRow.Key, nil)
+	}).WithEqual(nil)
+	checkedCount := ggui.Map(checkedItems, func(rows []cachedImageRow) int { return len(rows) })
 
 	explore := func(row cachedImageRow, tab int) {
 		if row.fromGVX {
@@ -283,6 +288,7 @@ func cachedImagesView(m *Model) ggui.Widget {
 	}
 
 	table := ui.Table(visible, cachedImageRow.Key,
+		selectCheckboxColumn(visible, checked, cachedImageRow.Key, cachedImageRow.Ref, nil),
 		ui.Col(tr("Repository"), func(r ggui.Readable[cachedImageRow]) ggui.Widget {
 			type repoCell struct {
 				repo      string
@@ -469,7 +475,13 @@ func cachedImagesView(m *Model) ggui.Widget {
 			return widget.Row(ui.Spinner(), ui.Caption(tr("Reading the image cache…"))).Gap(8)
 		}
 		count := ggui.Combine(visible, all, func(v, a []cachedImageRow) string { return showing(len(v), len(a)) })
-		return tableCard(table.Toolbar(filterBar(m.ImageQuery, tr("Filter images"), count)))
+		bulkRemove := ui.Button(tr("Remove…"), func() {
+			m.AskRemoveCachedImages(ggui.Peek(checkedItems), func() { clearSelection(checked) })
+		}).Destructive().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Trash, 13)).BindDisabled(ggui.Map(m.BusyOps, func(b map[string]bool) bool {
+			return b["dimg:bulk"]
+		}))
+		tb := bulkToolbar(filterBar(m.ImageQuery, tr("Filter images"), count), checkedCount, func() { clearSelection(checked) }, bulkRemove)
+		return tableCard(table.Toolbar(tb))
 	})
 }
 
@@ -515,7 +527,13 @@ func gvxImagesView(m *Model) ggui.Widget {
 		}
 		return names
 	}
+	checked := newBulkSelection()
+	checkedItems := ggui.Combine(visible, checked, func(rows []rungv.Image, sel map[string]bool) []rungv.Image {
+		return selectedItems(rows, sel, rungv.Image.Key, nil)
+	}).WithEqual(nil)
+	checkedCount := ggui.Map(checkedItems, func(rows []rungv.Image) int { return len(rows) })
 	table := ui.Table(visible, rungv.Image.Key,
+		selectCheckboxColumn(visible, checked, rungv.Image.Key, rungv.Image.Ref, nil),
 		ui.Col(tr("Repository"), func(r ggui.Readable[rungv.Image]) ggui.Widget {
 			return widget.Row(
 				glyph(lucide.Layers, 16).Color(colorGray),
@@ -587,7 +605,13 @@ func gvxImagesView(m *Model) ggui.Widget {
 			return widget.Row(ui.Spinner(), ui.Caption(tr("Reading the image cache…"))).Gap(8)
 		}
 		count := ggui.Combine(visible, m.Images, func(v []rungv.Image, l Listing[rungv.Image]) string { return showing(len(v), len(l.Items)) })
-		return tableCard(table.Toolbar(filterBar(m.ImageQuery, tr("Filter images"), count)))
+		bulkRemove := ui.Button(tr("Remove…"), func() {
+			m.AskRemoveGVXImages(ggui.Peek(checkedItems), func() { clearSelection(checked) })
+		}).Destructive().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Trash, 13)).BindDisabled(ggui.Map(m.BusyOps, func(b map[string]bool) bool {
+			return b["img:bulk"]
+		}))
+		tb := bulkToolbar(filterBar(m.ImageQuery, tr("Filter images"), count), checkedCount, func() { clearSelection(checked) }, bulkRemove)
+		return tableCard(table.Toolbar(tb))
 	})
 }
 
@@ -613,8 +637,14 @@ func dockerImagesView(m *Model) ggui.Widget {
 		return dockerImageRows(l.Items)
 	}).WithEqual(nil)
 	visible := ggui.Combine(all, m.DockerImageQuery, filterDockerImages).WithEqual(nil)
+	checked := newBulkSelection()
+	checkedItems := ggui.Combine(visible, checked, func(rows []DockerImageRow, sel map[string]bool) []DockerImageRow {
+		return selectedItems(rows, sel, DockerImageRow.Key, nil)
+	}).WithEqual(nil)
+	checkedCount := ggui.Map(checkedItems, func(rows []DockerImageRow) int { return len(rows) })
 
 	table := ui.Table(visible, DockerImageRow.Key,
+		selectCheckboxColumn(visible, checked, DockerImageRow.Key, DockerImageRow.Ref, nil),
 		ui.Col(tr("Repository"), func(r ggui.Readable[DockerImageRow]) ggui.Widget {
 			type repoCell struct {
 				repo      string
@@ -770,7 +800,13 @@ func dockerImagesView(m *Model) ggui.Widget {
 			return widget.Row(ui.Spinner(), ui.Caption(msg)).Gap(8)
 		}
 		count := ggui.Combine(visible, all, func(v, a []DockerImageRow) string { return showing(len(v), len(a)) })
-		return tableCard(table.Toolbar(filterBar(m.DockerImageQuery, tr("Filter Docker images"), count)))
+		bulkRemove := ui.Button(tr("Remove…"), func() {
+			m.AskRemoveDockerImages(ggui.Peek(checkedItems), func() { clearSelection(checked) })
+		}).Destructive().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Trash, 13)).BindDisabled(ggui.Map(m.BusyOps, func(b map[string]bool) bool {
+			return b["dimg:bulk"]
+		}))
+		tb := bulkToolbar(filterBar(m.DockerImageQuery, tr("Filter Docker images"), count), checkedCount, func() { clearSelection(checked) }, bulkRemove)
+		return tableCard(table.Toolbar(tb))
 	})
 }
 
@@ -874,8 +910,14 @@ func localRegistryImagesView(m *Model) ggui.Widget {
 	visible := ggui.Combine(m.LocalRegistryImages, m.LocalRegistryQuery, func(l Listing[localreg.ImageEntry], q string) []localreg.ImageEntry {
 		return filterLocalRegistryImages(l.Items, q)
 	}).WithEqual(nil)
+	checked := newBulkSelection()
+	checkedItems := ggui.Combine(visible, checked, func(rows []localreg.ImageEntry, sel map[string]bool) []localreg.ImageEntry {
+		return selectedItems(rows, sel, localreg.ImageEntry.Key, nil)
+	}).WithEqual(nil)
+	checkedCount := ggui.Map(checkedItems, func(rows []localreg.ImageEntry) int { return len(rows) })
 
 	table := ui.Table(visible, localreg.ImageEntry.Key,
+		selectCheckboxColumn(visible, checked, localreg.ImageEntry.Key, localreg.ImageEntry.Key, nil),
 		ui.Col(tr("Repository"), func(r ggui.Readable[localreg.ImageEntry]) ggui.Widget {
 			return widget.Row(
 				glyph(lucide.Layers, 16).Color(colorGray),
@@ -977,7 +1019,13 @@ func localRegistryImagesView(m *Model) ggui.Widget {
 		count := ggui.Combine(visible, m.LocalRegistryImages, func(v []localreg.ImageEntry, l Listing[localreg.ImageEntry]) string {
 			return showing(len(v), len(l.Items))
 		})
-		return tableCard(table.Toolbar(filterBar(m.LocalRegistryQuery, tr("Filter local registry images"), count)))
+		bulkDelete := ui.Button(tr("Delete…"), func() {
+			m.AskDeleteLocalRegistryImages(ggui.Peek(checkedItems), func() { clearSelection(checked) })
+		}).Destructive().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Trash, 13)).BindDisabled(ggui.Map(m.BusyOps, func(b map[string]bool) bool {
+			return b["lreg:bulk"]
+		}))
+		tb := bulkToolbar(filterBar(m.LocalRegistryQuery, tr("Filter local registry images"), count), checkedCount, func() { clearSelection(checked) }, bulkDelete)
+		return tableCard(table.Toolbar(tb))
 	})
 	return widget.Column(statusCard, body).Gap(12).Stretch()
 }
@@ -1014,12 +1062,31 @@ func volumesPage(m *Model) ggui.Widget {
 		return out
 	}).WithEqual(nil)
 	count := ggui.Combine(visible, all, func(v, a []rungv.Volume) string { return showing(len(v), len(a)) })
+	volKey := func(v rungv.Volume) string { return v.Name }
+	volCanSelect := func(v rungv.Volume) (bool, string) {
+		if v.InUse {
+			return false, tr("In use — stop the sandbox or container first.")
+		}
+		return true, ""
+	}
+	checked := newBulkSelection()
+	checkedItems := ggui.Combine(visible, checked, func(rows []rungv.Volume, sel map[string]bool) []rungv.Volume {
+		return selectedItems(rows, sel, volKey, volCanSelect)
+	}).WithEqual(nil)
+	checkedCount := ggui.Map(checkedItems, func(rows []rungv.Volume) int { return len(rows) })
 	type volStatus struct {
 		inUse bool
 		users string
 	}
+	bulkDelete := ui.Button(tr("Delete…"), func() {
+		m.AskRemoveVolumes(ggui.Peek(checkedItems), func() { clearSelection(checked) })
+	}).Destructive().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Trash, 13)).BindDisabled(ggui.Map(m.BusyOps, func(b map[string]bool) bool {
+		return b["vol:bulk"]
+	}))
+	volToolbar := bulkToolbar(filterBar(m.VolumeQuery, tr("Filter by name, driver or sandbox"), count), checkedCount, func() { clearSelection(checked) }, bulkDelete)
 	table := ui.Table(visible,
-		func(v rungv.Volume) string { return v.Name },
+		volKey,
+		selectCheckboxColumn(visible, checked, volKey, volKey, volCanSelect),
 		ui.Col(tr("Name"), func(r ggui.Readable[rungv.Volume]) ggui.Widget {
 			return widget.Row(
 				glyph(lucide.HardDrive, 16).Color(colorGray),
@@ -1083,7 +1150,7 @@ func volumesPage(m *Model) ggui.Widget {
 			})
 		}).W(112).Identified("actions"),
 	).BindSelected(m.SelectedVolume).RowName(func(v rungv.Volume) string { return v.Name }).RowHeight(tableRow).
-		Toolbar(filterBar(m.VolumeQuery, tr("Filter by name, driver or sandbox"), count))
+		Toolbar(volToolbar)
 
 	type volViewState struct {
 		state int
@@ -1208,9 +1275,47 @@ func snapshotsPage(m *Model) ggui.Widget {
 				Media(glyph(lucide.Camera, 32).Color(colorGray)).
 				Action(ui.Button(tr("Open Sandboxes"), func() { m.Go(PageSandboxes) }).Outline()).Outline()
 		}
+		checked := newBulkSelection()
+		snapKey := func(s sandbox.Snapshot) string { return s.Dir }
+		checkedItems := ggui.Combine(visible, checked, func(rows []sandbox.Snapshot, sel map[string]bool) []sandbox.Snapshot {
+			return selectedItems(rows, sel, snapKey, nil)
+		}).WithEqual(nil)
+		checkedCount := ggui.Map(checkedItems, func(rows []sandbox.Snapshot) int { return len(rows) })
+		allSelected := ggui.Bind(
+			func() bool {
+				v := visible.Get()
+				c := checkedCount.Get()
+				return len(v) > 0 && c == len(v)
+			},
+			func(on bool) {
+				v := ggui.Peek(visible)
+				keys := make([]string, len(v))
+				for i, s := range v {
+					keys[i] = s.Dir
+				}
+				setSelectionKeys(checked, keys, on)
+			},
+		)
+		someSelected := ggui.Combine(visible, checkedCount, func(v []sandbox.Snapshot, c int) bool {
+			return c > 0 && c < len(v)
+		})
+		selectAllBox := quietTableCheckbox(
+			ui.Checkbox(allSelected, "").
+				BindIndeterminate(someSelected).
+				BindDisabled(ggui.Map(visible, func(v []sandbox.Snapshot) bool { return len(v) == 0 })).
+				Name(tr("Select all")),
+		)
+		filterRow := widget.Row(
+			selectAllBox,
+			widget.Expanded(filterBar(m.SnapshotQuery, tr("Filter snapshots"), count)),
+		).Gap(8).Align(widget.AlignCenter)
+		bulkDelete := ui.Button(tr("Delete…"), func() {
+			m.AskDeleteSnapshots(ggui.Peek(checkedItems), func() { clearSelection(checked) })
+		}).Destructive().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Trash, 13))
+		toolbar := bulkToolbar(filterRow, checkedCount, func() { clearSelection(checked) }, bulkDelete)
 		return widget.Column(
-			ui.Card(filterBar(m.SnapshotQuery, tr("Filter snapshots"), count)).Pad(6, 10),
-			snapshotList(m, visible, true, emptyText),
+			ui.Card(toolbar).Pad(6, 10),
+			snapshotListWithSelection(m, visible, true, emptyText, checked),
 		).Gap(12).Stretch()
 	})
 	return page(

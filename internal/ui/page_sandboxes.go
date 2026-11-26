@@ -60,13 +60,56 @@ func sandboxesPage(m *Model) ggui.Widget {
 		}
 		return tr("All")
 	}).Outline().Size(ui.ButtonExtraSmall).Spacing(0).Name(tr("Status"))
-	toolbar := widget.Row(
+	mainToolbar := widget.Row(
 		widget.Expanded(filterBar(m.Query, tr("Filter by name or image"), count)),
 		statusFilter,
 	).Gap(12).Align(widget.AlignCenter)
+	rowKey := func(r Row) string { return r.Spec.ID }
+	rowLabel := func(r Row) string { return r.Spec.Name }
+	checked := newBulkSelection()
+	checkedItems := ggui.Combine(visible, checked, func(rows []Row, sel map[string]bool) []Row {
+		return selectedItems(rows, sel, rowKey, nil)
+	}).WithEqual(nil)
+	checkedCount := ggui.Map(checkedItems, func(rows []Row) int { return len(rows) })
+	canStartAny := ggui.Map(checkedItems, func(rows []Row) bool {
+		for _, r := range rows {
+			if !r.State.Status.Active() {
+				return true
+			}
+		}
+		return false
+	})
+	canStopAny := ggui.Map(checkedItems, func(rows []Row) bool {
+		for _, r := range rows {
+			if r.State.Status.Active() {
+				return true
+			}
+		}
+		return false
+	})
+	checkedIDs := func() []string {
+		rows := ggui.Peek(checkedItems)
+		ids := make([]string, len(rows))
+		for i, r := range rows {
+			ids[i] = r.Spec.ID
+		}
+		return ids
+	}
+	clearChecked := func() { clearSelection(checked) }
+	toolbar := bulkToolbar(mainToolbar, checkedCount, clearChecked,
+		ui.Button(tr("Start"), func() { m.BulkStartSandboxes(checkedIDs(), clearChecked) }).
+			Outline().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Play, 13)).
+			BindDisabled(ggui.Not(canStartAny)),
+		ui.Button(tr("Stop"), func() { m.BulkStopSandboxes(checkedIDs(), clearChecked) }).
+			Outline().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Square, 13)).
+			BindDisabled(ggui.Not(canStopAny)),
+		ui.Button(tr("Delete…"), func() { m.AskDeleteSandboxes(checkedIDs(), clearChecked) }).
+			Destructive().Size(ui.ButtonExtraSmall).Icon(glyph(lucide.Trash, 13)),
+	)
 	// The table is as tall as its rows up to five, and scrolls past that, so
 	// the details below stay in reach above the fold.
-	table := ui.Table(visible, func(r Row) string { return r.Spec.ID },
+	table := ui.Table(visible, rowKey,
+		selectCheckboxColumn(visible, checked, rowKey, rowLabel, nil),
 		ui.Col(tr("Status"), func(r ggui.Readable[Row]) ggui.Widget {
 			return ggui.View(ggui.Map(r, func(r Row) sandbox.State { return r.State }), statusLabel)
 		}).W(150),
@@ -626,6 +669,10 @@ func sandboxSnapshots(m *Model, r Row) ggui.Widget {
 }
 
 func snapshotList(m *Model, snaps ggui.Readable[[]sandbox.Snapshot], showSandbox bool, emptyText ggui.Readable[string]) ggui.Widget {
+	return snapshotListWithSelection(m, snaps, showSandbox, emptyText, nil)
+}
+
+func snapshotListWithSelection(m *Model, snaps ggui.Readable[[]sandbox.Snapshot], showSandbox bool, emptyText ggui.Readable[string], sel *ggui.StateValue[map[string]bool]) ggui.Widget {
 	render := func(specNames map[string]string) ggui.Widget {
 		return widget.EachKeyed(snaps, func(s sandbox.Snapshot) string { return s.Dir }, func(row widget.EachItem[sandbox.Snapshot]) ggui.Widget {
 			s := row.Item
@@ -638,8 +685,17 @@ func snapshotList(m *Model, snaps ggui.Readable[[]sandbox.Snapshot], showSandbox
 					title = tr("(deleted sandbox) · ") + title
 				}
 			}
+			var media ggui.Widget = glyph(lucide.Camera, 18).Color(colorBlue)
+			if sel != nil {
+				dir := s.Dir
+				cb := quietTableCheckbox(ui.Checkbox(ggui.Bind(
+					func() bool { return sel.Get()[dir] },
+					func(on bool) { toggleSelectionKey(sel, dir, on) },
+				), "").Name(tr("Select %s", title)))
+				media = widget.Row(cb, media).Gap(8).Align(widget.AlignCenter)
+			}
 			return ui.Item(title, desc+" · "+s.Dir).
-				Media(glyph(lucide.Camera, 18).Color(colorBlue)).
+				Media(media).
 				Action(widget.Row(
 					ui.Button(tr("Restore"), func() { m.Restore(s) }).Outline().Size(ui.ButtonSmall).Icon(glyph(lucide.RotateCcw, 14)),
 					tip(iconButton(lucide.FolderOpen, tr("Reveal"), func() { m.Open(s.Dir) }), tr("Reveal in file manager")),
