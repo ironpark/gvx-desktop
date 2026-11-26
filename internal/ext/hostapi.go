@@ -1950,6 +1950,10 @@ func (s *hostAPIServer) handleUIPickFolder(w http.ResponseWriter, r *http.Reques
 	}
 	dir, ok, err := s.cfg.uiHost.PickFolder(r.Context(), s.cfg.extID)
 	if err != nil {
+		if errors.Is(err, context.Canceled) && !s.isClosed() && r.Context().Err() == nil {
+			writeHostJSON(w, http.StatusOK, map[string]any{"cancelled": true, "path": ""})
+			return
+		}
 		writeHostError(w, http.StatusInternalServerError, "pick_folder_failed", err.Error())
 		return
 	}

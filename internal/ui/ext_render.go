@@ -375,12 +375,17 @@ func (v *extTreeView) nodeWith(n *uiblock.Node, inLine, bare bool) (out ggui.Wid
 	case uiblock.KindSelect:
 		id := n.ID
 		field := v.form.field(id, n.Value)
-		out = widget.Box(ui.Select(ggui.Bind(field.Get, func(x string) {
+		sel := ui.Select(ggui.Bind(field.Get, func(x string) {
 			field.Set(x)
 			if n.Change {
 				v.send(id, uiblock.EventChange, x)
 			}
-		})).Options(n.Options).Name(tr("Choose")).Disabled(n.Disabled)).MaxWidth(260)
+		})).Options(n.Options).Name(tr("Choose")).Disabled(n.Disabled)
+		if v.inToolbar || inLine {
+			out = widget.Box(sel).MaxWidth(260)
+		} else {
+			out = sel
+		}
 	case uiblock.KindTabs:
 		id := n.ID
 		field := v.form.field(id, n.Value)
@@ -1492,15 +1497,16 @@ func (v *extTreeView) container(n *uiblock.Node, bare bool) ggui.Widget {
 		if gap == 0 {
 			gap = 8
 		}
-		inner := v.tappableBoxWhen(widget.Column(kids...).Gap(gap).Stretch(), n, !bare)
+		inner := widget.Column(kids...).Gap(gap).Stretch()
 		if !bare && (n.Drag != "" || n.Drop) {
-			return wrapDialogs(v.dragDrop(inner, n))
+			return wrapDialogs(v.dragDrop(v.tappableBoxWhen(inner, n, !bare), n))
 		}
 		border := colorBorder
 		if n.Tone != "" {
 			border = toneColor(n.Tone)
 		}
 		var out ggui.Widget
+		radius := 8.0
 		switch n.Variant {
 		case "ghost":
 			out = widget.Box(inner).Radius(8).Pad(12, 14)
@@ -1515,6 +1521,7 @@ func (v *extTreeView) container(n *uiblock.Node, bare bool) ggui.Widget {
 		case "primary":
 			out = widget.Box(inner).Fill(uitheme.Muted).Border(1, colorBlue).Radius(8).Pad(12, 14)
 		case "soft":
+			radius = 10
 			if n.Tone != "" {
 				out = &extWashed{child: widget.Box(inner).Pad(12, 14), color: toneColor(n.Tone), radius: 10}
 			} else {
@@ -1522,6 +1529,11 @@ func (v *extTreeView) container(n *uiblock.Node, bare bool) ggui.Widget {
 			}
 		default:
 			out = widget.Box(inner).Fill(uitheme.Card).Border(1, border).Radius(8).Pad(12, 14)
+		}
+		if !bare && n.Tap {
+			id := n.ID
+			out = ui.ButtonOf(out, func() { v.send(id, uiblock.EventTap, "") }).
+				Ghost().Pad(0).Radius(radius).Name(strings.Join(extNodeTexts(n), " "))
 		}
 		return wrapDialogs(out)
 	case uiblock.KindScroll:

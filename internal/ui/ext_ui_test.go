@@ -22,6 +22,7 @@ import (
 
 	"github.com/ironpark/ggui"
 	"github.com/ironpark/ggui/inspect"
+	gguiruntime "github.com/ironpark/ggui/runtime"
 	uitheme "github.com/ironpark/ggui/ui/theme"
 	"github.com/ironpark/ggui/widget"
 
@@ -2525,4 +2526,116 @@ description = "한국어 설정 설명"
 			extUISemHasText(sem, "한국어 설정") &&
 			extUISemHasText(sem, "한국어 설정 설명")
 	}, "Korean manifest description and setting labels rendered in Extensions page")
+}
+
+func TestExtUI_PickFolderCancelReturnsNoError(t *testing.T) {
+	dir := t.TempDir()
+	st := store.Store{Dir: dir}
+	var m *Model
+	p := ggui.ProbeBuilder(func() ggui.Widget { return ggui.Provide(ggui.ReducedMotionKey, true, Build(m)) }, ggui.Sz(900, 600))
+	p.Setup(func() {
+		m = NewModel(st, dir)
+		m.Offline = true
+		m.Attach(p)
+	})
+	defer p.Close()
+	p.Frame()
+
+	uiHost := modelUIHost{m: m}
+	stub, ok := p.Dialogs().(*gguiruntime.StubFilePicker)
+	if !ok {
+		t.Fatalf("Probe.Dialogs() = %T, want *runtime.StubFilePicker", p.Dialogs())
+	}
+
+	// 1. Default StubFilePicker has no Paths -> returns runtime.ErrCanceled -> must report cancelled without error.
+	picked, chosen, err := uiHost.PickFolder(context.Background(), "github-actions")
+	if err != nil || chosen || picked != "" {
+		t.Fatalf("PickFolder(cancel) = (%q, %v, %v), want (\"\", false, nil)", picked, chosen, err)
+	}
+
+	// 2. Explicit ErrCanceled wrapped -> still treated as normal cancel.
+	stub.Err = fmt.Errorf("dialog: %w", gguiruntime.ErrCanceled)
+	picked, chosen, err = uiHost.PickFolder(context.Background(), "github-actions")
+	if err != nil || chosen || picked != "" {
+		t.Fatalf("PickFolder(wrapped ErrCanceled) = (%q, %v, %v), want (\"\", false, nil)", picked, chosen, err)
+	}
+
+	// 3. Non-cancel dialog error still propagates.
+	stub.Err = errors.New("dialog backend failed")
+	if _, _, err := uiHost.PickFolder(context.Background(), "github-actions"); err == nil {
+		t.Fatal("PickFolder(real error) returned nil, want error")
+	}
+
+	// 4. Valid folder selection succeeds.
+	stub.Err = nil
+	stub.Paths = []string{"/tmp/demo-repo"}
+	picked, chosen, err = uiHost.PickFolder(context.Background(), "github-actions")
+	if err != nil || !chosen || picked != "/tmp/demo-repo" {
+		t.Fatalf("PickFolder(selected) = (%q, %v, %v), want (\"/tmp/demo-repo\", true, nil)", picked, chosen, err)
+	}
+}
+
+func TestExtUI_FormSelectStretchesAndClickableCardTaps(t *testing.T) {
+	u := &extsdk.UI{}
+	raw, err := json.Marshal(u.Column(
+		u.Card(
+			extsdk.Key("form_card"),
+			u.Select([]string{"ci.yml", "release.yml"}, "ci.yml", extsdk.Key("wf_sel"), extsdk.OnChange("pick")),
+			u.Card(
+				extsdk.Key("job_card"),
+				extsdk.Variant("outline"),
+				extsdk.OnTap("inspect_job", "lint"),
+				u.Text("Lint Job", extsdk.Weight("semibold")),
+			),
+		),
+	).Fill(true))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	tree, err := uiblock.Read(raw)
+	if err != nil {
+		t.Fatalf("uiblock.Read: %v", err)
+	}
+
+	var tappedNode string
+	form := newBlockForm()
+	p := ggui.ProbeBuilder(func() ggui.Widget {
+		form.redraw()
+		w := renderUIBlockTree("test-ext", "main", tree.Root, tree.Root, form, func(ev uiblock.Event) {
+			if ev.Kind == uiblock.EventTap {
+				tappedNode = ev.Node
+			}
+		})
+		form.pruneDialogs()
+		return ggui.Provide(ggui.ReducedMotionKey, true, w)
+	}, ggui.Sz(460, 400))
+	defer p.Close()
+	p.Frame()
+
+	// Select inside a vertical card stretches beyond the old 260px cap.
+	selNode, ok := extUIFindSemNode(p.Semantics(), ggui.RoleButton, "Choose")
+	if !ok {
+		selNode, ok = extUIFindSemNode(p.Semantics(), ggui.RoleCombobox, "Choose")
+	}
+	if !ok {
+		for _, n := range p.Semantics().All() {
+			if strings.Contains(n.Name, "Choose") || strings.Contains(n.Value, "ci.yml") {
+				selNode, ok = n, true
+				break
+			}
+		}
+	}
+	if !ok {
+		t.Fatalf("select node not found in semantics:\n%s", p.Semantics())
+	}
+	if selNode.Full.Size.W <= 300 {
+		t.Fatalf("vertical form select width = %.1f, want > 300 (stretched full width)", selNode.Full.Size.W)
+	}
+
+	// Clickable Card fires EventTap when tapped.
+	extUITapSem(t, p, ggui.RoleButton, "Lint Job")
+	p.Frame()
+	if tappedNode == "" {
+		t.Fatalf("tapping clickable card did not dispatch EventTap:\n%s", p.Semantics())
+	}
 }

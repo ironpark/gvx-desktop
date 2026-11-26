@@ -504,6 +504,9 @@ func (h modelUIHost) PickFolder(ctx context.Context, _ string) (string, bool, er
 	}
 	dir, err := h.m.host.Dialogs().PickFolder(gguiruntime.FileDialog{Title: tr("Choose a folder")})
 	if err != nil {
+		if errors.Is(err, gguiruntime.ErrCanceled) || errors.Is(err, context.Canceled) {
+			return "", false, nil
+		}
 		return "", false, err
 	}
 	if dir == "" {
