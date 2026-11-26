@@ -64,7 +64,7 @@ irm https://raw.githubusercontent.com/ironpark/gvx-desktop/main/install.ps1 | ie
 스크립트는 영어·한국어·일본어 TUI(설정 또는 Windows 로캘에서 자동 감지, 실행 중 `L` 키로 전환)를 제공하며, 실행 중인 앱 확인, SHA-256 체크섬 검증 후 릴리스에 설치 프로그램(`.exe`)이 있으면 이를 실행하고 이전 릴리스에서는 포터블 ZIP으로 자동 폴백합니다.
 
 - **업데이트**: 같은 명령을 다시 실행합니다.
-- **특정 버전 설치**: `$env:GVX_DESKTOP_VERSION = '0.11.3'`
+- **특정 버전 설치**: `$env:GVX_DESKTOP_VERSION = '0.11.4'`
 - **설치 언어 지정**: `$env:GVX_DESKTOP_LANG = 'ko'` (`en`, `ko`, `ja`)
 - **비대화형 설치**: `$env:GVX_DESKTOP_NONINTERACTIVE = '1'`
 - **바탕 화면 바로가기 제어**: `$env:GVX_DESKTOP_DESKTOP_SHORTCUT = '0'` (또는 `'1'`)
@@ -90,7 +90,7 @@ sudo dnf install ./gvx-desktop-*.x86_64.rpm     # Fedora, RHEL
 모든 릴리스는 `SHA256SUMS`, 파일별 `.sha256`, `BUILD_INFO.txt`, 그리고 서명된 SLSA v1.0 빌드 프로비넌스 번들(`gvx-desktop-v<version>.sigstore.json`)을 함께 게시합니다. GitHub CLI로 다운로드한 파일을 검증할 수 있습니다.
 
 ```sh
-V=0.11.3  # 릴리스 버전
+V=0.11.4  # 릴리스 버전
 gh attestation verify "gvx-desktop-$V-macos-arm64.dmg" \
   --repo ironpark/gvx-desktop \
   --signer-workflow ironpark/gvx-desktop/.github/workflows/release.yml \

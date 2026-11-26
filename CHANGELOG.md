@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-11-26
+
+### Added
+
+- **Multi-select checkboxes & bulk actions**: added leading checkboxes with a tri-state **Select all** header checkbox and an inline bulk action bar across **Images** (Cached, GVX, Docker, Local Registry), **Containers** (including tri-state Compose project group checkboxes), **Sandboxes**, **Volumes**, **Networks**, and **Snapshots** for bulk remove/delete and bulk start/stop. Non-removable items (in-use volumes, built-in or active-container networks) remain disabled with explanatory tooltips and are excluded from **Select all**. Fully localized across all 7 UI languages.
+
+### Changed
+
+- **Extension `uiblock` layout polish**: vertical form `KindSelect` controls now stretch cleanly to full width instead of capping at `260px`, and clickable `KindCard` widgets wrap their styled card directly without double outer padding or center-squished inner text.
+
+### Fixed
+
+- **Extension folder picker cancellation**: canceling the OS folder picker from an extension UI now returns a normal canceled result instead of an HTTP 500 host error.
+
 ## [0.11.3] - 2026-11-26
 
 ### Added
@@ -215,7 +229,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Initial release of GVX Desktop for Apple silicon macOS with Homebrew cask distribution.
 - Sandbox management, image registry search (Docker Hub & Quay), `ext4lite`/`hostfs` volumes, checkpoint snapshots, `rungv` installer/updater, and English & Korean UI.
 
-[Unreleased]: https://github.com/ironpark/gvx-desktop/compare/v0.11.3...HEAD
+[Unreleased]: https://github.com/ironpark/gvx-desktop/compare/v0.11.4...HEAD
+[0.11.4]: https://github.com/ironpark/gvx-desktop/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/ironpark/gvx-desktop/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/ironpark/gvx-desktop/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/ironpark/gvx-desktop/compare/v0.11.0...v0.11.1
