@@ -510,6 +510,14 @@ func (m *Model) reconcileLocalProxy(want bool, cfgHTTP, cfgHTTPS int, op string)
 		srv.SetRoutes(routesCopy)
 		err := srv.Start()
 		runningAfter = srv.Running()
+		if runningAfter {
+			// Re-apply the latest routes in case syncLocalProxyWith updated
+			// m.localProxyRoutes while srv was being created or started.
+			m.localProxyMu.Lock()
+			latestRoutes := slices.Clone(m.localProxyRoutes)
+			m.localProxyMu.Unlock()
+			srv.SetRoutes(latestRoutes)
+		}
 		httpAddrAfter = srv.HTTPAddr()
 		httpsAddrAfter = srv.HTTPSAddr()
 		if runningAfter {
@@ -528,12 +536,15 @@ func (m *Model) reconcileLocalProxy(want bool, cfgHTTP, cfgHTTPS int, op string)
 		if !stale {
 			m.localProxyInFlight = ""
 		}
+		latestRoutes := slices.Clone(m.localProxyRoutes)
+		srv := m.localProxy
 		m.localProxyMu.Unlock()
-		if stale {
+		if stale || m.quitting {
 			return
 		}
-		if m.quitting {
-			return
+		if runningAfter && srv != nil && !slices.EqualFunc(routesAfter, latestRoutes, localproxy.Route.Equal) {
+			srv.SetRoutes(latestRoutes)
+			routesAfter = srv.Routes()
 		}
 		m.LocalProxy.Update(func(st LocalProxyState) LocalProxyState {
 			st.Running = runningAfter
