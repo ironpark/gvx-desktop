@@ -299,6 +299,9 @@ func applyUpdateToSpec(spec *Spec, u rungv.Update) {
 	if u.IsolateLAN != nil {
 		spec.IsolateLAN = *u.IsolateLAN
 	}
+	if u.PidsLimit != nil {
+		spec.PidsLimit = *u.PidsLimit
+	}
 	if u.NetTXBPS != nil {
 		spec.NetTXBPS = *u.NetTXBPS
 	}
@@ -439,6 +442,7 @@ func LiveUpdate(running, edited Spec) (u rungv.Update, live bool) {
 	a, b := running.Clone(), edited.Clone()
 	a.Memory, b.Memory = "", ""
 	a.CPUs, b.CPUs = "", ""
+	a.PidsLimit, b.PidsLimit = 0, 0
 	a.IsolateLAN, b.IsolateLAN = false, false
 	a.NetTXBPS, b.NetTXBPS = 0, 0
 	a.NetRXBPS, b.NetRXBPS = 0, 0
@@ -460,6 +464,10 @@ func LiveUpdate(running, edited Spec) (u rungv.Update, live bool) {
 		} else {
 			u.CPUs = edited.CPUs
 		}
+	}
+	if running.PidsLimit != edited.PidsLimit {
+		v := edited.PidsLimit
+		u.PidsLimit = &v
 	}
 	if running.IsolateLAN != edited.IsolateLAN {
 		v := edited.IsolateLAN
@@ -490,6 +498,7 @@ type LiveDiff struct {
 	AddPorts      []string
 	RemovePorts   []string
 	AddMounts     []Mount
+	RemountMounts []Mount
 	RemoveMounts  []string
 }
 
@@ -500,6 +509,7 @@ func (d LiveDiff) IsZero() bool {
 		len(d.AddPorts) == 0 &&
 		len(d.RemovePorts) == 0 &&
 		len(d.AddMounts) == 0 &&
+		len(d.RemountMounts) == 0 &&
 		len(d.RemoveMounts) == 0
 }
 
@@ -512,6 +522,7 @@ func ComputeLiveDiff(running, edited Spec, st State) (LiveDiff, bool) {
 	a, b := running.Clone(), edited.Clone()
 	a.Memory, b.Memory = "", ""
 	a.CPUs, b.CPUs = "", ""
+	a.PidsLimit, b.PidsLimit = 0, 0
 	a.IsolateLAN, b.IsolateLAN = false, false
 	a.NetTXBPS, b.NetTXBPS = 0, 0
 	a.NetRXBPS, b.NetRXBPS = 0, 0
@@ -542,6 +553,13 @@ func ComputeLiveDiff(running, edited Spec, st State) (LiveDiff, bool) {
 		} else {
 			diff.Update.CPUs = edited.CPUs
 		}
+	}
+	if running.PidsLimit != edited.PidsLimit {
+		if !st.Control {
+			return LiveDiff{}, false
+		}
+		v := edited.PidsLimit
+		diff.Update.PidsLimit = &v
 	}
 	if running.IsolateLAN != edited.IsolateLAN {
 		if !st.Control || !isNAT {
@@ -607,6 +625,8 @@ func ComputeLiveDiff(running, edited Spec, st State) (LiveDiff, bool) {
 			return st.Control
 		case MountBind:
 			return st.Control && (st.BindAttach || st.LiveMounts)
+		case MountVolume:
+			return st.Control && st.VolumeAttach && !m.Ephemeral && m.Size == ""
 		default:
 			return false
 		}
@@ -619,6 +639,10 @@ func ComputeLiveDiff(running, edited Spec, st State) (LiveDiff, bool) {
 			}
 			diff.RemoveMounts = append(diff.RemoveMounts, m.Target)
 		} else if !mountsEqual(m, em) {
+			if st.Control && mountsSameExceptReadOnly(m, em) && (em.ReadOnly || m.Type == MountTmpfs) {
+				diff.RemountMounts = append(diff.RemountMounts, em)
+				continue
+			}
 			if !mountAllowedLive(m) || !mountAllowedLive(em) {
 				return LiveDiff{}, false
 			}
@@ -639,13 +663,21 @@ func ComputeLiveDiff(running, edited Spec, st State) (LiveDiff, bool) {
 }
 
 func mountsEqual(a, b Mount) bool {
-	if a.Type != b.Type || a.Target != b.Target || a.ReadOnly != b.ReadOnly || a.Size != b.Size {
+	if a.Type != b.Type || a.Target != b.Target || a.ReadOnly != b.ReadOnly || a.Size != b.Size || a.Ephemeral != b.Ephemeral || a.Symlinks != b.Symlinks {
 		return false
 	}
 	if a.Type == MountBind {
 		return rungv.ExpandHome(a.Source) == rungv.ExpandHome(b.Source)
 	}
 	return a.Source == b.Source
+}
+
+func mountsSameExceptReadOnly(a, b Mount) bool {
+	if a.ReadOnly == b.ReadOnly {
+		return false
+	}
+	b.ReadOnly = a.ReadOnly
+	return mountsEqual(a, b)
 }
 
 func diffStrings(before, after []string) (added, removed []string) {
@@ -1102,6 +1134,61 @@ func (s *Supervisor) AddMount(ctx context.Context, id string, m Mount) error {
 	return nil
 }
 
+// Remount toggles an existing mount point between read-only and read-write
+// inside the active run of id (`rungvx mount remount`), updates ActiveSpec,
+// and emits EventChanged.
+func (s *Supervisor) Remount(ctx context.Context, id string, guestTarget string, readOnly bool) error {
+	p, client, target, err := s.controlTarget(id)
+	if err != nil {
+		return err
+	}
+	if err := client.Remount(ctx, target, guestTarget, readOnly); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.procs[id] == p && p.state.Status.Active() {
+		want := path.Clean(strings.TrimSpace(guestTarget))
+		for i := range p.spec.Mounts {
+			if p.spec.Mounts[i].Target == guestTarget || (want != "" && path.Clean(strings.TrimSpace(p.spec.Mounts[i].Target)) == want) {
+				p.spec.Mounts[i].ReadOnly = readOnly
+				break
+			}
+		}
+	}
+	s.mu.Unlock()
+	mode := "rw"
+	if readOnly {
+		mode = "ro"
+	}
+	s.Logs(id).Add(System, fmt.Sprintf("── Updated: remounted %s (%s)", guestTarget, mode))
+	s.notify(Event{ID: id, Kind: EventChanged, State: s.State(id)})
+	return nil
+}
+
+// Dmesg reads buffered guest kernel log records from the active run of id
+// (`rungvx dmesg`, gvx-ctrl/2 kernel.log).
+func (s *Supervisor) Dmesg(ctx context.Context, id string, opts rungv.DmesgOptions) (string, error) {
+	_, client, target, err := s.controlTarget(id)
+	if err != nil {
+		return "", err
+	}
+	return client.Dmesg(ctx, target, opts)
+}
+
+// SetLogLevel dynamically changes the Sentry debug log level of the active run
+// of id (`rungvx debug --log-level`, gvx-ctrl/2 debug.log_level).
+func (s *Supervisor) SetLogLevel(ctx context.Context, id string, level string) error {
+	_, client, target, err := s.controlTarget(id)
+	if err != nil {
+		return err
+	}
+	if err := client.SetLogLevel(ctx, target, level); err != nil {
+		return err
+	}
+	s.Logs(id).Add(System, "── Updated: log-level "+strings.ToLower(strings.TrimSpace(level)))
+	return nil
+}
+
 // RemoveMount unmounts guestTarget inside the active run of id, updates
 // ActiveSpec, and emits EventChanged.
 func (s *Supervisor) RemoveMount(ctx context.Context, id string, guestTarget string, lazy bool) error {
@@ -1231,6 +1318,23 @@ func (s *Supervisor) ApplyLive(ctx context.Context, id string, diff LiveDiff) er
 		s.mu.Unlock()
 		portsChanged = true
 		applied = append(applied, "added ports "+strings.Join(diff.AddPorts, ", "))
+	}
+
+	for _, m := range diff.RemountMounts {
+		if err := client.Remount(ctx, target, m.Target, m.ReadOnly); err != nil {
+			finish()
+			return err
+		}
+		s.mu.Lock()
+		if s.procs[id] == p && p.state.Status.Active() {
+			p.spec.Mounts = upsertMountInSpec(p.spec.Mounts, m)
+		}
+		s.mu.Unlock()
+		mode := "rw"
+		if m.ReadOnly {
+			mode = "ro"
+		}
+		applied = append(applied, fmt.Sprintf("remounted %s (%s)", m.Target, mode))
 	}
 
 	for _, rmTarget := range diff.RemoveMounts {

@@ -40,12 +40,13 @@ const (
 
 // Mount is one mount of a sandbox.
 type Mount struct {
-	Type     MountType `json:"type"`
-	Source   string    `json:"source,omitempty"` // volume name, image path, or host path
-	Target   string    `json:"target"`
-	ReadOnly bool      `json:"readOnly,omitempty"`
-	Size     string    `json:"size,omitempty"`     // tmpfs size, such as 64m
-	Symlinks string    `json:"symlinks,omitempty"` // bind mounts only: "", "virtual", or "contained" (rungvx v0.26+)
+	Type      MountType `json:"type"`
+	Source    string    `json:"source,omitempty"` // volume name, image path, or host path
+	Target    string    `json:"target"`
+	ReadOnly  bool      `json:"readOnly,omitempty"`
+	Size      string    `json:"size,omitempty"`      // tmpfs or ext4lite volume size cap, such as 64m or 2g
+	Ephemeral bool      `json:"ephemeral,omitempty"` // volume mounts only: scratch ext4lite image discarded at exit (rungvx v0.22+)
+	Symlinks  string    `json:"symlinks,omitempty"`  // bind mounts only: "", "virtual", or "contained" (rungvx v0.26+)
 }
 
 // Spec is everything a sandbox starts with. Because a gvx sandbox locks its
@@ -61,8 +62,9 @@ type Spec struct {
 	// SetEntrypoint makes Entrypoint apply even when empty, which clears it.
 	SetEntrypoint bool `json:"setEntrypoint,omitempty"`
 
-	Env   []string `json:"env,omitempty"`   // KEY=VALUE, or KEY to copy from the host
-	Ports []string `json:"ports,omitempty"` // rungv -p specs
+	Env      []string `json:"env,omitempty"`      // KEY=VALUE, or KEY to copy from the host
+	EnvFiles []string `json:"envFiles,omitempty"` // host .env files (--env-file)
+	Ports    []string `json:"ports,omitempty"`    // rungv -p specs
 	// UnixForwards forward guest Unix sockets to host Unix sockets (--unix-forward):
 	// GUEST_PATH=HOST_SOCKET[,uid=N,gid=N,mode=0600].
 	UnixForwards []string `json:"unixForwards,omitempty"`
@@ -72,9 +74,13 @@ type Spec struct {
 	WorkspaceRO       bool    `json:"workspaceRO,omitempty"`
 	WorkspaceSymlinks string  `json:"workspaceSymlinks,omitempty"` // "", "virtual", or "contained" (rungvx v0.26+)
 	RootfsVolume      string  `json:"rootfsVolume,omitempty"`
+	ReadOnlyRoot      bool    `json:"readOnlyRoot,omitempty"` // --read-only (incompatible with RootfsVolume)
 
-	Memory string `json:"memory,omitempty"` // 512m, 2g
-	CPUs   string `json:"cpus,omitempty"`   // 1.5
+	Memory         string `json:"memory,omitempty"`         // 512m, 2g
+	CPUs           string `json:"cpus,omitempty"`           // 1.5
+	PidsLimit      int64  `json:"pidsLimit,omitempty"`      // --pids-limit (0 = unlimited)
+	GPU            string `json:"gpu,omitempty"`            // "", "venus", or "virgl" (rungvx v0.28+ -tags ext_gpu)
+	GPUMemoryLimit string `json:"gpuMemoryLimit,omitempty"` // -gpu-memory-limit (e.g. 512m, 2g)
 
 	Network    string `json:"network,omitempty"` // nat (default), none, wg
 	WGConf     string `json:"wgConf,omitempty"`
@@ -220,9 +226,12 @@ func (s Spec) Validate() error {
 		}
 		targets[m.Target] = true
 	}
+	if s.ReadOnlyRoot && s.RootfsVolume != "" {
+		return errors.New("A read-only root file system cannot be combined with a persistent root volume.")
+	}
 	if s.RootfsVolume != "" {
 		for _, m := range s.Mounts {
-			if m.Type == MountVolume && m.Source == s.RootfsVolume {
+			if m.Type == MountVolume && !m.Ephemeral && m.Source == s.RootfsVolume {
 				return errors.New("The root file system volume cannot also be mounted as a data volume.")
 			}
 		}
@@ -233,6 +242,22 @@ func (s Spec) Validate() error {
 	if s.CPUs != "" {
 		if v, err := strconv.ParseFloat(s.CPUs, 64); err != nil || v <= 0 {
 			return errors.New("Write the CPU limit as a positive number, such as 1.5.")
+		}
+	}
+	if s.PidsLimit < 0 {
+		return errors.New("Write the PIDs limit as a positive integer, or leave it empty for unlimited.")
+	}
+	switch strings.ToLower(strings.TrimSpace(s.GPU)) {
+	case "", "off", "venus", "virgl":
+	default:
+		return fmt.Errorf("Unsupported GPU mode %q (use off, venus, or virgl).", s.GPU)
+	}
+	if strings.TrimSpace(s.GPUMemoryLimit) != "" {
+		if !s.UsesGPU() {
+			return errors.New("GPU memory limit requires GPU acceleration (venus or virgl) to be enabled.")
+		}
+		if !memoryRe.MatchString(strings.TrimSpace(s.GPUMemoryLimit)) {
+			return errors.New("Write the GPU memory limit as a number with a unit, such as 512m or 2g.")
 		}
 	}
 	for _, e := range s.Env {
@@ -388,6 +413,23 @@ func (s Spec) UsesBindSymlinks() bool {
 	return false
 }
 
+// UsesVolumeOptions reports whether the spec configures ext4lite volume
+// mount options (size= or ephemeral) that require rungvx v0.22+.
+func (s Spec) UsesVolumeOptions() bool {
+	for _, m := range s.Mounts {
+		if m.Type == MountVolume && (m.Ephemeral || m.Size != "") {
+			return true
+		}
+	}
+	return false
+}
+
+// UsesGPU reports whether the spec enables virtio-gpu acceleration (-gpu).
+func (s Spec) UsesGPU() bool {
+	mode := strings.ToLower(strings.TrimSpace(s.GPU))
+	return mode != "" && mode != "off"
+}
+
 func (m Mount) validate() error {
 	if !strings.HasPrefix(m.Target, "/") || m.Target == "/" {
 		return fmt.Errorf("Mount target %q must be an absolute guest path other than /.", m.Target)
@@ -403,12 +445,25 @@ func (m Mount) validate() error {
 	if m.Symlinks != "" && m.Type != MountBind {
 		return fmt.Errorf("Mount at %s: symlink mode applies to bind mounts only.", m.Target)
 	}
+	if m.Ephemeral && m.Type != MountVolume {
+		return fmt.Errorf("Mount at %s: ephemeral applies to volume mounts only.", m.Target)
+	}
 	switch m.Type {
 	case MountVolume:
-		if m.Source == "" {
-			return fmt.Errorf("The volume at %s needs a name.", m.Target)
+		if m.Size != "" && !memoryRe.MatchString(m.Size) {
+			return fmt.Errorf("Volume at %s: write size as a number with a unit, such as 512m or 2g.", m.Target)
 		}
-		if !strings.ContainsAny(m.Source, `/\`) && !volumeRe.MatchString(m.Source) {
+		if m.Ephemeral && m.ReadOnly {
+			return fmt.Errorf("Volume at %s: ephemeral volumes cannot be read-only.", m.Target)
+		}
+		if !m.Ephemeral {
+			if m.Source == "" {
+				return fmt.Errorf("The volume at %s needs a name.", m.Target)
+			}
+			if !strings.ContainsAny(m.Source, `/\`) && !volumeRe.MatchString(m.Source) {
+				return fmt.Errorf("Volume name %q: use letters, digits, '-', '_' and '.'.", m.Source)
+			}
+		} else if m.Source != "" && !strings.ContainsAny(m.Source, `/\`) && !volumeRe.MatchString(m.Source) {
 			return fmt.Errorf("Volume name %q: use letters, digits, '-', '_' and '.'.", m.Source)
 		}
 	case MountBind:
@@ -504,6 +559,9 @@ type Paths struct {
 	// AllowBindAttach passes --allow-bind-attach on run and restore so POSIX
 	// SCM_RIGHTS `rungv mount add --type bind` works under host lockdown.
 	AllowBindAttach bool
+	// AllowVolumeAttach passes --allow-volume-attach on run and restore so POSIX
+	// SCM_RIGHTS `rungv mount add --type volume` works under host lockdown.
+	AllowVolumeAttach bool
 	// RestoreLiveMounts reports that rungv restore accepts --attach-bind and
 	// --serve, so RestoreArgs inspects <dir>/manifest.json to reattach
 	// checkpointed dynamic bind and rpcfs mounts.
@@ -631,8 +689,9 @@ func (s Spec) RestoreArgs(dir string, p Paths) []string {
 		skipMounts, attachBinds, serveMounts = s.restoreLiveMountFlags(dir)
 	}
 	args = append(args, s.flags(Paths{
-		DynamicPorts:    p.DynamicPorts,
-		AllowBindAttach: p.AllowBindAttach,
+		DynamicPorts:      p.DynamicPorts,
+		AllowBindAttach:   p.AllowBindAttach,
+		AllowVolumeAttach: p.AllowVolumeAttach,
 	}, true, skipMounts)...)
 	for _, ab := range attachBinds {
 		args = append(args, "--attach-bind", ab)
@@ -664,11 +723,28 @@ func (s Spec) flags(p Paths, restore bool, skipMounts map[string]bool) []string 
 		for _, e := range s.Env {
 			add("-e", e)
 		}
+		for _, ef := range s.EnvFiles {
+			if f := strings.TrimSpace(ef); f != "" {
+				add("--env-file", rungv.ExpandHome(f))
+			}
+		}
 		if s.Memory != "" {
 			add("--memory", s.Memory)
 		}
 		if s.CPUs != "" {
 			add("--cpus", s.CPUs)
+		}
+		if s.PidsLimit > 0 {
+			add("--pids-limit", strconv.FormatInt(s.PidsLimit, 10))
+		}
+		if s.UsesGPU() {
+			add("-gpu", strings.ToLower(strings.TrimSpace(s.GPU)))
+			if lim := strings.TrimSpace(s.GPUMemoryLimit); lim != "" {
+				add("-gpu-memory-limit", lim)
+			}
+		}
+		if s.ReadOnlyRoot {
+			add("--read-only")
 		}
 		if s.Backend != "" && s.Backend != "auto" {
 			add("--backend", s.Backend)
@@ -758,6 +834,9 @@ func (s Spec) flags(p Paths, restore bool, skipMounts map[string]bool) []string 
 	if p.AllowBindAttach {
 		add("--allow-bind-attach")
 	}
+	if p.AllowVolumeAttach {
+		add("--allow-volume-attach")
+	}
 	if !restore && p.ControlSocket != "" {
 		add("-control-socket", p.ControlSocket)
 	}
@@ -790,10 +869,24 @@ func (m Mount) args() []string {
 		}
 		return []string{"--tmpfs", v}
 	case MountVolume:
-		if strings.ContainsAny(m.Source, `/\`) {
-			// An .ext4 image at a host path goes through --mount, because -v
-			// would mount the file itself as one regular file.
-			v := "type=volume,src=" + rungv.ExpandHome(m.Source) + ",dst=" + m.Target
+		if strings.ContainsAny(m.Source, `/\`) || m.Size != "" || m.Ephemeral {
+			// An .ext4 image at a host path, or volume options (size=, ephemeral),
+			// go through --mount type=volume,...
+			v := "type=volume"
+			if m.Source != "" {
+				src := m.Source
+				if strings.ContainsAny(src, `/\`) {
+					src = rungv.ExpandHome(src)
+				}
+				v += ",src=" + src
+			}
+			v += ",dst=" + m.Target
+			if m.Size != "" {
+				v += ",size=" + m.Size
+			}
+			if m.Ephemeral {
+				v += ",ephemeral"
+			}
 			if m.ReadOnly {
 				v += ",readonly"
 			}
@@ -863,7 +956,7 @@ func (s Spec) Volumes() []string {
 		out = append(out, s.RootfsVolume)
 	}
 	for _, m := range s.Mounts {
-		if m.Type == MountVolume && !strings.ContainsAny(m.Source, `/\`) {
+		if m.Type == MountVolume && !m.Ephemeral && m.Source != "" && !strings.ContainsAny(m.Source, `/\`) {
 			out = append(out, m.Source)
 		}
 	}
@@ -887,6 +980,7 @@ func (s Spec) UnixSockets() []string {
 func (s Spec) Clone() Spec {
 	c := s
 	c.Env = append([]string(nil), s.Env...)
+	c.EnvFiles = append([]string(nil), s.EnvFiles...)
 	c.Ports = append([]string(nil), s.Ports...)
 	c.UnixForwards = append([]string(nil), s.UnixForwards...)
 	c.DynamicPortAddrs = append([]string(nil), s.DynamicPortAddrs...)

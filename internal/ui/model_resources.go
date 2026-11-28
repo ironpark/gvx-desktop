@@ -1167,12 +1167,15 @@ type Draft struct {
 	Entrypoint               string
 	SetEntrypoint            bool
 	Ports, UnixForwards, Env string
+	EnvFiles                 string
 	Volumes, Binds, Tmpfs    string
 	Workspace                string
 	WorkspaceRO              bool
 	WorkspaceSymlinks        bool
 	RootfsVolume             string
-	Memory, CPUs             string
+	ReadOnlyRoot             bool
+	Memory, CPUs, PidsLimit  string
+	GPU, GPUMemoryLimit      string
 	Network, WGConf          string
 	IsolateLAN               bool
 	NetTX, NetRX             string
@@ -1195,9 +1198,9 @@ func DraftFrom(s sandbox.Spec) Draft {
 	d := Draft{
 		ID: s.ID, Name: s.Name, Image: s.Image, Command: s.Command,
 		Entrypoint: s.Entrypoint, SetEntrypoint: s.SetEntrypoint,
-		Ports: strings.Join(s.Ports, "\n"), UnixForwards: strings.Join(s.UnixForwards, "\n"), Env: strings.Join(s.Env, "\n"),
-		Workspace: s.Workspace, WorkspaceRO: s.WorkspaceRO, WorkspaceSymlinks: s.WorkspaceSymlinks == sandbox.SymlinksContained, RootfsVolume: s.RootfsVolume,
-		Memory: s.Memory, CPUs: s.CPUs, Network: s.Network, WGConf: s.WGConf, IsolateLAN: s.IsolateLAN,
+		Ports: strings.Join(s.Ports, "\n"), UnixForwards: strings.Join(s.UnixForwards, "\n"), Env: strings.Join(s.Env, "\n"), EnvFiles: strings.Join(s.EnvFiles, "\n"),
+		Workspace: s.Workspace, WorkspaceRO: s.WorkspaceRO, WorkspaceSymlinks: s.WorkspaceSymlinks == sandbox.SymlinksContained, RootfsVolume: s.RootfsVolume, ReadOnlyRoot: s.ReadOnlyRoot,
+		Memory: s.Memory, CPUs: s.CPUs, GPU: s.GPU, GPUMemoryLimit: s.GPUMemoryLimit, Network: s.Network, WGConf: s.WGConf, IsolateLAN: s.IsolateLAN,
 		NetTX: formatBandwidthBPS(s.NetTXBPS), NetRX: formatBandwidthBPS(s.NetRXBPS),
 		NATPolicyFile: s.NATPolicyFile, DynamicPortAddrs: strings.Join(s.DynamicPortAddrs, "\n"),
 		AutoPublish: sandbox.HasAutoPublish(s), AutoPublishAddr: s.AutoPublishAddr,
@@ -1205,6 +1208,12 @@ func DraftFrom(s sandbox.Spec) Draft {
 		Privileged: !s.Unprivileged, HostCACerts: s.HostCACerts, Pull: s.Pull,
 		Checkpoint: s.Checkpoint, AutoStart: s.AutoStart, ReadyPattern: s.ReadyPattern,
 		ExtraArgs: s.ExtraArgs, Recipe: s.Recipe, CreatedAt: s.CreatedAt,
+	}
+	if s.PidsLimit > 0 {
+		d.PidsLimit = strconv.FormatInt(s.PidsLimit, 10)
+	}
+	if d.GPU == "" {
+		d.GPU = "off"
 	}
 	if d.Network == "" {
 		d.Network = "nat"
@@ -1219,7 +1228,7 @@ func DraftFrom(s sandbox.Spec) Draft {
 	for _, mt := range s.Mounts {
 		switch mt.Type {
 		case sandbox.MountVolume:
-			vols = append(vols, mountLine(mt.Source, mt.Target, mt.ReadOnly))
+			vols = append(vols, volumeMountLine(mt.Source, mt.Target, mt.ReadOnly, mt.Size, mt.Ephemeral))
 		case sandbox.MountBind:
 			binds = append(binds, bindMountLine(mt.Source, mt.Target, mt.ReadOnly, mt.Symlinks))
 		case sandbox.MountTmpfs:
@@ -1247,6 +1256,73 @@ func mountLine(src, dst string, ro bool) string {
 		l += ":ro"
 	}
 	return l
+}
+
+func volumeMountLine(src, dst string, ro bool, size string, ephemeral bool) string {
+	l := src + ":" + dst
+	var opts []string
+	if ro {
+		opts = append(opts, "ro")
+	}
+	if size != "" {
+		opts = append(opts, "size="+size)
+	}
+	if ephemeral {
+		opts = append(opts, "ephemeral")
+	}
+	if len(opts) > 0 {
+		l += ":" + strings.Join(opts, ",")
+	}
+	return l
+}
+
+func parseVolumeMount(line string) (src, dst string, ro bool, size string, ephemeral bool, err error) {
+	// Support scratch ephemeral volumes written as "/guest/path:ephemeral[,size=512m]"
+	// as well as "NAME:/guest/path[:ro][,size=512m][,ephemeral]".
+	var rest string
+	if strings.HasPrefix(line, "/") && !strings.Contains(line[1:], ":/") {
+		src = ""
+		rest = line
+	} else {
+		i := strings.LastIndex(line, ":/")
+		if i < 0 {
+			return "", "", false, "", false, fmt.Errorf("mount %q: write NAME:/guest/path[:ro][,size=512m][,ephemeral]", line)
+		}
+		src = line[:i]
+		rest = line[i+1:]
+	}
+	dst, opts, hasOpts := strings.Cut(rest, ":")
+	if !hasOpts {
+		if src == "" {
+			return "", "", false, "", false, fmt.Errorf("mount %q: write NAME:/guest/path[:ro][,size=512m][,ephemeral]", line)
+		}
+		return src, dst, false, "", false, nil
+	}
+	for opt := range strings.SplitSeq(opts, ",") {
+		opt = strings.TrimSpace(opt)
+		if opt == "" {
+			continue
+		}
+		switch {
+		case opt == "ro":
+			ro = true
+		case opt == "rw":
+			ro = false
+		case opt == "ephemeral":
+			ephemeral = true
+		case strings.HasPrefix(opt, "size="):
+			size = strings.TrimSpace(strings.TrimPrefix(opt, "size="))
+			if size == "" {
+				return "", "", false, "", false, fmt.Errorf("mount %q: size= needs a value such as 512m or 2g", line)
+			}
+		default:
+			return "", "", false, "", false, fmt.Errorf("mount %q: unknown volume option %q (use ro, rw, size=..., or ephemeral)", line, opt)
+		}
+	}
+	if src == "" && !ephemeral {
+		return "", "", false, "", false, fmt.Errorf("mount %q: write NAME:/guest/path[:ro][,size=512m][,ephemeral]", line)
+	}
+	return src, dst, ro, size, ephemeral, nil
 }
 
 func bindMountLine(src, dst string, ro bool, symlinks string) string {
@@ -1466,18 +1542,33 @@ func (d Draft) Spec() (sandbox.Spec, error) {
 			}
 		}
 	}
+	var pidsLimit int64
+	if p := strings.TrimSpace(d.PidsLimit); p != "" {
+		v, err := strconv.ParseInt(p, 10, 64)
+		if err != nil || v < 0 {
+			return sandbox.Spec{}, fmt.Errorf("PIDs limit %q: write a positive integer, or leave empty for unlimited.", p)
+		}
+		pidsLimit = v
+	}
 	s := sandbox.Spec{
 		ID: d.ID, Name: strings.TrimSpace(d.Name), Image: strings.TrimSpace(d.Image),
 		Command: strings.TrimSpace(d.Command), Entrypoint: strings.TrimSpace(d.Entrypoint), SetEntrypoint: d.SetEntrypoint,
-		Ports: lines(d.Ports), UnixForwards: lines(d.UnixForwards), Env: lines(d.Env),
-		Workspace: strings.TrimSpace(d.Workspace), WorkspaceRO: d.WorkspaceRO, RootfsVolume: strings.TrimSpace(d.RootfsVolume),
-		Memory: strings.TrimSpace(d.Memory), CPUs: strings.TrimSpace(d.CPUs), WGConf: strings.TrimSpace(d.WGConf), IsolateLAN: d.IsolateLAN,
+		Ports: lines(d.Ports), UnixForwards: lines(d.UnixForwards), Env: lines(d.Env), EnvFiles: lines(d.EnvFiles),
+		Workspace: strings.TrimSpace(d.Workspace), WorkspaceRO: d.WorkspaceRO, RootfsVolume: strings.TrimSpace(d.RootfsVolume), ReadOnlyRoot: d.ReadOnlyRoot,
+		Memory: strings.TrimSpace(d.Memory), CPUs: strings.TrimSpace(d.CPUs), PidsLimit: pidsLimit,
+		GPUMemoryLimit: strings.TrimSpace(d.GPUMemoryLimit),
+		WGConf:         strings.TrimSpace(d.WGConf), IsolateLAN: d.IsolateLAN,
 		NetTXBPS: tx, NetRXBPS: rx, NATPolicyFile: natPolicy,
 		DynamicPortAddrs: dynAddrs, AutoPublishAddr: autoPubAddr,
 		Hostname: strings.TrimSpace(d.Hostname), User: strings.TrimSpace(d.User), Workdir: strings.TrimSpace(d.Workdir),
 		Unprivileged: !d.Privileged, HostCACerts: d.HostCACerts,
 		Checkpoint: d.Checkpoint, AutoStart: d.AutoStart, ReadyPattern: strings.TrimSpace(d.ReadyPattern),
 		ExtraArgs: strings.TrimSpace(d.ExtraArgs), Recipe: d.Recipe, CreatedAt: d.CreatedAt,
+	}
+	if gpu := strings.ToLower(strings.TrimSpace(d.GPU)); gpu != "" && gpu != "off" {
+		s.GPU = gpu
+	} else {
+		s.GPUMemoryLimit = ""
 	}
 	if !isNAT {
 		s.Network = d.Network
@@ -1497,11 +1588,11 @@ func (d Draft) Spec() (sandbox.Spec, error) {
 		s.WorkspaceSymlinks = sandbox.SymlinksContained
 	}
 	for _, l := range lines(d.Volumes) {
-		src, dst, ro, err := parseMount(l)
+		src, dst, ro, size, eph, err := parseVolumeMount(l)
 		if err != nil {
 			return s, err
 		}
-		s.Mounts = append(s.Mounts, sandbox.Mount{Type: sandbox.MountVolume, Source: src, Target: dst, ReadOnly: ro})
+		s.Mounts = append(s.Mounts, sandbox.Mount{Type: sandbox.MountVolume, Source: src, Target: dst, ReadOnly: ro, Size: size, Ephemeral: eph})
 	}
 	for _, l := range lines(d.Binds) {
 		src, dst, ro, sym, err := parseBindMount(l)

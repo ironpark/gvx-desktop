@@ -237,6 +237,13 @@ func rowMenu(m *Model, r Row) ggui.Widget {
 	if r.State.Status == sandbox.Running && !r.State.Paused {
 		entries = append(entries, ui.MenuItem(tr("Restart"), func() { m.RestartSandbox(id) }))
 	}
+	if r.State.Status.Active() && r.State.Control {
+		entries = append(entries, ui.MenuSub(tr("Sentry log level"),
+			ui.MenuItem(tr("Warning"), func() { m.SetSandboxLogLevel(id, "warning") }),
+			ui.MenuItem(tr("Info"), func() { m.SetSandboxLogLevel(id, "info") }),
+			ui.MenuItem(tr("Debug"), func() { m.SetSandboxLogLevel(id, "debug") }),
+		))
+	}
 	entries = append(entries, ui.MenuDivider(), ui.MenuItem(tr("Delete…"), func() { m.AskDelete(id) }).Destructive())
 	return moreMenu(tr("More actions for %s", r.Spec.Name), entries...)
 }
@@ -257,7 +264,7 @@ func detailPanel(m *Model) ggui.Widget {
 		return ggui.If(hasSelection, func() ggui.Widget {
 			header := ggui.View(current, func(r Row) ggui.Widget { return detailHeader(m, r) })
 			tabs := ui.Tabs(m.Detail,
-				ui.Tab(tr("Logs"), logsView(m)),
+				ui.Tab(tr("Logs"), logsView(m, current)),
 				ui.Tab(tr("Connect"), ggui.View(current, func(r Row) ggui.Widget { return connectView(m, r) })),
 				ui.Tab(tr("Configuration"), ggui.View(ggui.Map(current, func(r Row) sandbox.Spec { return r.Spec }).WithEqual(sandbox.Spec.Equal), func(s sandbox.Spec) ggui.Widget { return configView(m, s) })),
 				ui.Tab(tr("Snapshots"), ggui.View(current, func(r Row) ggui.Widget { return sandboxSnapshots(m, r) })),
@@ -339,10 +346,34 @@ func shortPath(p string) string {
 	return p
 }
 
-// logsView follows the selected sandbox's output.
-func logsView(m *Model) ggui.Widget {
-	return logViewer(m, m.Logs, tr("No output yet. Start the sandbox to see what it writes."),
-		tip(iconButton(lucide.Eraser, tr("Clear logs"), func() { m.ClearLogs(ggui.Peek(m.Selected)) }), tr("Clear")))
+// logsView follows the selected sandbox's output, and on running gvx-ctrl/2
+// sandboxes allows switching to buffered guest kernel logs (rungvx dmesg).
+func logsView(m *Model, current ggui.Readable[Row]) ggui.Widget {
+	hasCtrl := ggui.Map(current, func(r Row) bool {
+		return r.State.Status.Active() && r.State.Control
+	})
+	mode := ggui.Combine(hasCtrl, m.DmesgMode, func(ctrl, dmesg bool) bool {
+		return ctrl && dmesg
+	})
+	return ggui.View(mode, func(showDmesg bool) ggui.Widget {
+		switchBtn := ggui.If(hasCtrl, func() ggui.Widget {
+			if showDmesg {
+				return ui.Button(tr("Output"), func() { m.DmesgMode.Set(false) }).Outline().Size(ui.ButtonExtraSmall)
+			}
+			return ui.Button(tr("Kernel (dmesg)"), func() {
+				m.DmesgMode.Set(true)
+				m.LoadSandboxDmesg(ggui.Peek(m.Selected))
+			}).Outline().Size(ui.ButtonExtraSmall)
+		})
+		if showDmesg {
+			return logViewer(m, m.DmesgLines, tr("No kernel log entries."),
+				switchBtn,
+				tip(iconButton(lucide.RefreshCw, tr("Refresh kernel logs"), func() { m.LoadSandboxDmesg(ggui.Peek(m.Selected)) }), tr("Refresh")))
+		}
+		return logViewer(m, m.Logs, tr("No output yet. Start the sandbox to see what it writes."),
+			switchBtn,
+			tip(iconButton(lucide.Eraser, tr("Clear logs"), func() { m.ClearLogs(ggui.Peek(m.Selected)) }), tr("Clear")))
+	})
 }
 
 // logViewer shows lines of a log, with a field that filters them, their
@@ -573,11 +604,28 @@ func configView(m *Model, s sandbox.Spec) ggui.Widget {
 		case sandbox.MountTmpfs:
 			mounts = append(mounts, fmt.Sprintf("tmpfs %s %s", mt.Target, mt.Size))
 		default:
-			ro := ""
+			var opts []string
 			if mt.ReadOnly {
-				ro = tr(" (read-only)")
+				opts = append(opts, "ro")
 			}
-			mounts = append(mounts, fmt.Sprintf("%s %s → %s%s", mt.Type, mt.Source, mt.Target, ro))
+			if mt.Size != "" {
+				opts = append(opts, "size="+mt.Size)
+			}
+			if mt.Ephemeral {
+				opts = append(opts, "ephemeral")
+			}
+			if mt.Symlinks != "" {
+				opts = append(opts, "symlinks="+mt.Symlinks)
+			}
+			suffix := ""
+			if len(opts) > 0 {
+				suffix = " (" + strings.Join(opts, ", ") + ")"
+			}
+			src := mt.Source
+			if src == "" && mt.Ephemeral {
+				src = "ephemeral"
+			}
+			mounts = append(mounts, fmt.Sprintf("%s %s → %s%s", mt.Type, src, mt.Target, suffix))
 		}
 	}
 	if s.Workspace != "" {
@@ -600,12 +648,31 @@ func configView(m *Model, s sandbox.Spec) ggui.Widget {
 	if s.CPUs != "" {
 		limits = append(limits, tr("%s CPUs", s.CPUs))
 	}
+	if s.PidsLimit > 0 {
+		limits = append(limits, tr("%d PIDs", s.PidsLimit))
+	}
+	if s.UsesGPU() {
+		gpuText := tr("GPU %s", s.GPU)
+		if s.GPUMemoryLimit != "" {
+			gpuText += " (" + s.GPUMemoryLimit + ")"
+		}
+		limits = append(limits, gpuText)
+	}
 	sec := tr("privileged inside the sandbox")
 	if s.Unprivileged {
 		sec = tr("unprivileged")
 	}
+	if s.ReadOnlyRoot {
+		sec += ", " + tr("read-only root")
+	}
 	if s.HostCACerts {
 		sec += tr(", trusts host root certificates")
+	}
+	snapSummary := tr("off")
+	if s.Checkpoint {
+		snapSummary = tr("enabled (control socket + bundle directory)")
+	} else if ggui.Peek(m.RungvFeatures).Control {
+		snapSummary = tr("on demand (control socket)")
 	}
 	return widget.Padding(widget.Column(
 		ui.CodeBlock(line).Header(tr("Command line")).Language("sh").CopyButton(true).Small(),
@@ -613,11 +680,12 @@ func configView(m *Model, s sandbox.Spec) ggui.Widget {
 			kvText(tr("Image"), s.Image),
 			kvText(tr("Command"), s.Command),
 			kvText(tr("Environment"), join(s.Env)),
+			kvText(tr("Environment files"), join(s.EnvFiles)),
 			kvText(tr("Mounts"), join(mounts)),
 			kvText(tr("Network"), net),
 			kvText(tr("Limits"), strings.Join(limits, ", ")),
 			kvText(tr("Security"), sec),
-			kvText(tr("Snapshots"), map[bool]string{true: tr("enabled (control socket + bundle directory)"), false: tr("off")}[s.Checkpoint]),
+			kvText(tr("Snapshots"), snapSummary),
 			kvText(tr("Start with app"), startsWithApp(s)),
 			kvText(tr("Ready when log has"), s.ReadyPattern),
 		).Gap(8).Stretch(),
@@ -638,7 +706,7 @@ func startsWithApp(s sandbox.Spec) string {
 
 func sandboxSnapshots(m *Model, r Row) ggui.Widget {
 	id := r.Spec.ID
-	if !r.Spec.Checkpoint {
+	if !r.Spec.Checkpoint && !r.State.Control && !ggui.Peek(m.RungvFeatures).Control {
 		return widget.Padding(ui.Alert(tr("Snapshots are off for this sandbox"),
 			tr("A snapshot needs a control socket and a bundle directory opened before the guest starts. Turn snapshots on, then restart the sandbox.")).
 			Icon(icons.Info).
@@ -648,7 +716,7 @@ func sandboxSnapshots(m *Model, r Row) ggui.Widget {
 				m.OpenEditor(spec)
 			}).Size(ui.ButtonExtraSmall).Outline()), 8, 0)
 	}
-	running := r.State.Status.Active() && r.State.Status != sandbox.Stopping && !r.State.Paused
+	running := r.State.Status.Active() && r.State.Status != sandbox.Stopping && !r.State.Paused && (r.Spec.Checkpoint || r.State.Control)
 	snaps := ggui.Map(m.Snapshots, func(all []sandbox.Snapshot) []sandbox.Snapshot {
 		var out []sandbox.Snapshot
 		for _, s := range all {

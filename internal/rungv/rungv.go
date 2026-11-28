@@ -639,6 +639,50 @@ func (c *Client) PruneVolumes(ctx context.Context) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// CheckpointOptions configures `rungvx checkpoint` either against a pre-opened
+// -checkpoint-dir or as a gvx-ctrl/2 streamed bundle via -o/--output.
+type CheckpointOptions struct {
+	Dir          string // -checkpoint-dir (pre-opened dir; mutually exclusive with Output)
+	Output       string // -o (gvx-ctrl/2 checkpoint_stream destination dir, .tar, or "-")
+	LeaveRunning bool   // -leave-running
+	Compress     bool   // -z (zstd frame compression; valid only with Output)
+	Force        bool   // --force (checkpoint even while exec sessions are active)
+}
+
+// CheckpointArgs builds the argument vector for `rungvx checkpoint`.
+func CheckpointArgs(t Target, o CheckpointOptions) ([]string, error) {
+	if !t.Valid() {
+		return nil, errors.New("rungvx checkpoint: control target has no socket")
+	}
+	dir := strings.TrimSpace(o.Dir)
+	out := strings.TrimSpace(o.Output)
+	if dir != "" && out != "" {
+		return nil, errors.New("rungvx checkpoint: Dir and Output are mutually exclusive")
+	}
+	if o.Compress && out == "" {
+		return nil, errors.New("rungvx checkpoint: Compress requires Output")
+	}
+	args := []string{"checkpoint", "-control-socket", t.Socket}
+	if t.TokenFile != "" {
+		args = append(args, "--token-file", t.TokenFile)
+	}
+	if out != "" {
+		args = append(args, "-o", out)
+		if o.Compress {
+			args = append(args, "-z")
+		}
+	} else if dir != "" {
+		args = append(args, "-checkpoint-dir", dir)
+	}
+	if o.LeaveRunning {
+		args = append(args, "-leave-running")
+	}
+	if o.Force {
+		args = append(args, "--force")
+	}
+	return args, nil
+}
+
 // Checkpoint asks the sandbox listening on socket to write its bundle.
 func (c *Client) Checkpoint(ctx context.Context, socket, dir string, leaveRunning bool) error {
 	return c.CheckpointTarget(ctx, Target{Socket: socket}, dir, leaveRunning)
@@ -647,17 +691,23 @@ func (c *Client) Checkpoint(ctx context.Context, socket, dir string, leaveRunnin
 // CheckpointTarget asks the sandbox at t to write its bundle, passing
 // --token-file when t carries one.
 func (c *Client) CheckpointTarget(ctx context.Context, t Target, dir string, leaveRunning bool) error {
-	args := []string{"checkpoint", "-control-socket", t.Socket}
-	if t.TokenFile != "" {
-		args = append(args, "--token-file", t.TokenFile)
+	return c.CheckpointWithOptions(ctx, t, CheckpointOptions{
+		Dir:          dir,
+		LeaveRunning: leaveRunning,
+	})
+}
+
+// CheckpointWithOptions runs `rungvx checkpoint` with full gvx-ctrl/2 options
+// (including streamed checkpoints via -o/--output and -z compression).
+func (c *Client) CheckpointWithOptions(ctx context.Context, t Target, o CheckpointOptions) error {
+	if c == nil || c.Path == "" {
+		return ErrNotFound
 	}
-	if dir != "" {
-		args = append(args, "-checkpoint-dir", dir)
+	args, err := CheckpointArgs(t, o)
+	if err != nil {
+		return err
 	}
-	if leaveRunning {
-		args = append(args, "-leave-running")
-	}
-	_, err := c.output(ctx, args...)
+	_, err = c.output(ctx, args...)
 	return err
 }
 

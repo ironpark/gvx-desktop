@@ -1081,7 +1081,7 @@ func sandboxInfoFrom(spec sandbox.Spec, st sandbox.State, snap mcpSnapshot) mcps
 		Image:      spec.Image,
 		Status:     status,
 		Paused:     st.Paused,
-		Checkpoint: spec.Checkpoint,
+		Checkpoint: spec.Checkpoint || st.Control,
 		Ports:      ports,
 		Recipe:     spec.Recipe,
 		LocalURL:   localProxyHTTPSURLFor(snap.proxyRunning, snap.proxyHTTPSPort, snap.proxyRoutes, "sandbox", spec.Name),

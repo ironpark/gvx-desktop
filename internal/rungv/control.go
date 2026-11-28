@@ -60,6 +60,15 @@ type Features struct {
 	UnixForward bool
 	// BindAttach: run/restore take --allow-bind-attach for live host bind mounts.
 	BindAttach bool
+	// VolumeAttach: run/restore take --allow-volume-attach for live POSIX
+	// SCM_RIGHTS ext4lite volume attachment under lockdown.
+	VolumeAttach bool
+	// VolumeOptions: --mount type=volume supports size= and ephemeral (rungvx v0.22+).
+	VolumeOptions bool
+	// PidsLimit: run takes --pids-limit for root cgroup2 pids.max (rungvx v0.20+).
+	PidsLimit bool
+	// GPU: run takes -gpu (off|venus|virgl) and -gpu-memory-limit (rungvx v0.28+ -tags ext_gpu).
+	GPU bool
 	// DynamicPortAddrs: run/restore take --dynamic-ports-addr.
 	DynamicPortAddrs bool
 	// AutoPublishAddr: run/restore take --auto-publish-addr.
@@ -91,6 +100,10 @@ func (c *Client) Features(ctx context.Context) Features {
 		KeepBlobs:        c.HasRunFlag(ctx, "keep-blobs"),
 		UnixForward:      c.HasRunFlag(ctx, "unix-forward"),
 		BindAttach:       c.HasRunFlag(ctx, "allow-bind-attach"),
+		VolumeAttach:     c.HasRunFlag(ctx, "allow-volume-attach"),
+		VolumeOptions:    c.HasRunUsage(ctx, "ephemeral"),
+		PidsLimit:        c.HasRunFlag(ctx, "pids-limit"),
+		GPU:              c.HasRunFlag(ctx, "gpu"),
 		DynamicPortAddrs: c.HasRunFlag(ctx, "dynamic-ports-addr"),
 		AutoPublishAddr:  c.HasRunFlag(ctx, "auto-publish-addr"),
 		NetQoS:           c.HasRunFlag(ctx, "net-tx-bps"),
@@ -757,6 +770,30 @@ func (c *Client) AddMount(ctx context.Context, t Target, o MountAddOptions) erro
 	return err
 }
 
+// Remount toggles an existing managed mount point between read-only and
+// read-write inside a running sandbox (rungvx mount remount).
+func (c *Client) Remount(ctx context.Context, t Target, target string, readOnly bool) error {
+	if err := c.checkTarget(t); err != nil {
+		return err
+	}
+	dst := strings.TrimSpace(target)
+	if dst == "" {
+		return errors.New("rungvx mount remount: target path is required")
+	}
+	if err := checkNoLeadingDash("mount target", dst); err != nil {
+		return err
+	}
+	args := targetArgs("mount remount", t)
+	if readOnly {
+		args = append(args, "--ro")
+	} else {
+		args = append(args, "--rw")
+	}
+	args = append(args, "--", dst)
+	_, err := c.output(ctx, args...)
+	return err
+}
+
 // RemoveMount unmounts target inside a running sandbox (rungv mount rm).
 // When lazy is true, --detach (MNT_DETACH) is passed.
 func (c *Client) RemoveMount(ctx context.Context, t Target, target string, lazy bool) error {
@@ -1114,6 +1151,115 @@ func (c *Client) Events(ctx context.Context, t Target, fn func(Event)) error {
 	}
 	args := append(targetArgs("events", t), "-f", "json")
 	return streamNDJSON(ctx, c, args, fn)
+}
+
+// ---- port-forward, dmesg, debug -----------------------------------------
+
+// PortForwardOptions configures `rungvx port-forward` (gvx-ctrl/2 net.dial).
+type PortForwardOptions struct {
+	Address string // --address (default 127.0.0.1)
+	GuestIP string // --guest-ip (optional guest target IP)
+}
+
+// PortForwardArgs builds the argument vector for `rungvx port-forward`
+// without the executable name.
+func (c *Client) PortForwardArgs(t Target, specs []string, o PortForwardOptions) []string {
+	args := targetArgs("port-forward", t)
+	if addr := strings.TrimSpace(o.Address); addr != "" {
+		args = append(args, "--address", addr)
+	}
+	if gip := strings.TrimSpace(o.GuestIP); gip != "" {
+		args = append(args, "--guest-ip", gip)
+	}
+	cleaned := make([]string, 0, len(specs))
+	for _, s := range specs {
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	if len(cleaned) > 0 {
+		args = append(args, "--")
+		args = append(args, cleaned...)
+	}
+	return args
+}
+
+// PortForwardCommand builds the long-lived exec.Cmd of `rungvx port-forward`
+// against t. It works on any gvx-ctrl/2 sandbox without requiring --dynamic-ports.
+func (c *Client) PortForwardCommand(ctx context.Context, t Target, specs []string, o PortForwardOptions) *exec.Cmd {
+	return c.Command(ctx, c.PortForwardArgs(t, specs, o)...)
+}
+
+// DmesgOptions configures `rungvx dmesg` (gvx-ctrl/2 kernel.log).
+type DmesgOptions struct {
+	Follow bool // -f / --follow
+	Tail   int  // --tail N (0 = all buffered entries)
+	Level  int  // --level 1..8 (0 = all levels)
+	Clear  bool // --clear (clear ring after reading)
+}
+
+// DmesgArgs builds the argument vector for `rungvx dmesg` without the
+// executable name.
+func (c *Client) DmesgArgs(t Target, o DmesgOptions) []string {
+	args := targetArgs("dmesg", t)
+	if o.Follow {
+		args = append(args, "--follow")
+	}
+	if o.Tail > 0 {
+		args = append(args, "--tail", strconv.Itoa(o.Tail))
+	}
+	if o.Level >= 1 && o.Level <= 8 {
+		args = append(args, "--level", strconv.Itoa(o.Level))
+	}
+	if o.Clear {
+		args = append(args, "--clear")
+	}
+	return args
+}
+
+// DmesgCommand builds the exec.Cmd for `rungvx dmesg`.
+func (c *Client) DmesgCommand(ctx context.Context, t Target, o DmesgOptions) *exec.Cmd {
+	return c.Command(ctx, c.DmesgArgs(t, o)...)
+}
+
+// Dmesg reads buffered guest kernel log entries from a running sandbox
+// (`rungvx dmesg`, gvx-ctrl/2 kernel.log). Follow must be false.
+func (c *Client) Dmesg(ctx context.Context, t Target, o DmesgOptions) (string, error) {
+	if err := c.checkTarget(t); err != nil {
+		return "", err
+	}
+	if o.Follow {
+		return "", errors.New("rungvx dmesg: use DmesgCommand for streaming follow mode")
+	}
+	if o.Tail < 0 {
+		return "", errors.New("rungvx dmesg: tail must be non-negative")
+	}
+	if o.Level < 0 || o.Level > 8 {
+		return "", errors.New("rungvx dmesg: level must be between 0 and 8")
+	}
+	out, err := c.output(ctx, c.DmesgArgs(t, o)...)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// SetLogLevel dynamically changes the Sentry debug log verbosity of a running
+// sandbox (`rungvx debug --log-level`, gvx-ctrl/2 debug.log_level).
+// Valid levels are "warning", "info", and "debug".
+func (c *Client) SetLogLevel(ctx context.Context, t Target, level string) error {
+	if err := c.checkTarget(t); err != nil {
+		return err
+	}
+	lvl := strings.ToLower(strings.TrimSpace(level))
+	switch lvl {
+	case "warning", "info", "debug":
+	default:
+		return fmt.Errorf("rungvx debug: invalid log level %q (want warning, info, or debug)", level)
+	}
+	args := append(targetArgs("debug", t), "--log-level", lvl)
+	_, err := c.output(ctx, args...)
+	return err
 }
 
 // ---- errors -------------------------------------------------------------

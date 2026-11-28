@@ -179,6 +179,9 @@ type Model struct {
 	Amd64Resetting          *ggui.StateValue[bool]
 	Selected                *ggui.StateValue[string]
 	Logs                    *ggui.StateValue[[]sandbox.LogLine]
+	DmesgMode               *ggui.StateValue[bool]
+	DmesgLines              *ggui.StateValue[[]sandbox.LogLine]
+	DmesgLoading            *ggui.StateValue[bool]
 	Detail                  *ggui.StateValue[int]
 	Query                   *ggui.StateValue[string]
 
@@ -544,6 +547,9 @@ func NewModel(st store.Store, dataDir string) *Model {
 		Amd64Resetting:          ggui.State(false),
 		Selected:                ggui.State(""),
 		Logs:                    ggui.State([]sandbox.LogLine(nil)).WithEqual(nil),
+		DmesgMode:               ggui.State(false),
+		DmesgLines:              ggui.State([]sandbox.LogLine(nil)).WithEqual(nil),
+		DmesgLoading:            ggui.State(false),
 		Detail:                  ggui.State(0),
 		Query:                   ggui.State(""),
 
@@ -1270,6 +1276,8 @@ func (m *Model) Select(id string) {
 		return
 	}
 	m.Selected.Set(id)
+	m.DmesgMode.Set(false)
+	m.DmesgLines.Set(nil)
 	m.logSeq = -2
 	m.refreshLogs()
 }
@@ -1877,6 +1885,62 @@ func (m *Model) ClearLogs(id string) {
 	m.sup.Logs(id).Clear()
 	m.logSeq = -2
 	m.refreshLogs()
+}
+
+// LoadSandboxDmesg fetches buffered guest kernel logs (rungvx dmesg) for id.
+func (m *Model) LoadSandboxDmesg(id string) {
+	if id == "" {
+		return
+	}
+	m.DmesgLoading.Set(true)
+	var out string
+	m.async(func(ctx context.Context) error {
+		dCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		var err error
+		out, err = m.sup.Dmesg(dCtx, id, rungv.DmesgOptions{Tail: 500})
+		return err
+	}, func(err error) {
+		m.DmesgLoading.Set(false)
+		if ggui.Peek(m.Selected) != id {
+			return
+		}
+		if err != nil {
+			m.Toasts.Push(ui.Toast(tr("Could not read kernel logs"), err.Error()).Error())
+			return
+		}
+		now := time.Now()
+		var lines []sandbox.LogLine
+		for i, line := range strings.Split(strings.TrimRight(out, "\r\n"), "\n") {
+			if line == "" {
+				continue
+			}
+			lines = append(lines, sandbox.LogLine{
+				Seq:    int64(i + 1),
+				Time:   now,
+				Stream: sandbox.Stdout,
+				Text:   line,
+			})
+		}
+		m.DmesgLines.Set(lines)
+	})
+}
+
+// SetSandboxLogLevel updates the running sandbox's Sentry log verbosity
+// (rungvx debug --log-level warning|info|debug).
+func (m *Model) SetSandboxLogLevel(id, level string) {
+	spec, _ := m.spec(id)
+	m.async(func(ctx context.Context) error {
+		dCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return m.sup.SetLogLevel(dCtx, id, level)
+	}, func(err error) {
+		if err != nil {
+			m.Toasts.Push(ui.Toast(tr("Could not change log level"), err.Error()).Error())
+			return
+		}
+		m.Toasts.Push(ui.Toast(tr("Log level updated"), tr("%s now logs at %s level.", spec.Name, level)).Success())
+	})
 }
 
 // ---- Snapshots ----------------------------------------------------------

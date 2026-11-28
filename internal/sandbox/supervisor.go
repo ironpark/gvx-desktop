@@ -101,6 +101,8 @@ type State struct {
 	DynamicPorts bool
 	// BindAttach reports that the run started with --allow-bind-attach (live host bind mounts).
 	BindAttach bool
+	// VolumeAttach reports that the run started with --allow-volume-attach (live ext4lite volume mounts).
+	VolumeAttach bool
 	// LiveMounts reports that the run supports live host bind mounts via
 	// --allow-bind-attach (POSIX SCM_RIGHTS) or `rungv mount serve` (rpcfs,
 	// including on Windows).
@@ -126,6 +128,7 @@ func (s State) Equal(o State) bool {
 		s.Restored == o.Restored && s.LogSeq == o.LogSeq && s.Signal == o.Signal &&
 		s.Control == o.Control && s.Paused == o.Paused &&
 		s.DynamicPorts == o.DynamicPorts && s.BindAttach == o.BindAttach &&
+		s.VolumeAttach == o.VolumeAttach &&
 		s.LiveMounts == o.LiveMounts && s.NetQoS == o.NetQoS && s.NATPolicy == o.NATPolicy
 }
 
@@ -455,6 +458,15 @@ func checkSpecFeatures(spec Spec, feat rungv.Features) error {
 	if spec.UsesBindSymlinks() && !feat.BindSymlinks {
 		return errors.New("Host symbolic links in bind mounts (symlinks=contained) require rungvx v0.26 or later.")
 	}
+	if spec.UsesVolumeOptions() && !feat.VolumeOptions {
+		return errors.New("Volume size limits and ephemeral volumes require rungvx v0.22 or later.")
+	}
+	if spec.PidsLimit > 0 && !feat.PidsLimit {
+		return errors.New("PIDs limits (--pids-limit) require rungvx v0.20 or later.")
+	}
+	if spec.UsesGPU() && !feat.GPU {
+		return errors.New("GPU acceleration (-gpu) requires a rungvx build with GPU support (darwin/arm64-ext, v0.28+).")
+	}
 	return nil
 }
 
@@ -496,6 +508,7 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 	isNAT := spec.Network == "" || spec.Network == "nat"
 	paths.DynamicPorts = feat.DynamicPorts && spec.ContainerID == "" && isNAT
 	paths.AllowBindAttach = feat.BindAttach && runtime.GOOS != "windows" && spec.ContainerID == ""
+	paths.AllowVolumeAttach = feat.VolumeAttach && runtime.GOOS != "windows" && spec.ContainerID == ""
 	paths.RestoreLiveMounts = feat.RestoreLiveMounts
 	if HasAutoPublish(spec) && !client.HasRunFlag(context.Background(), "auto-publish") {
 		// An older rungv would refuse the run: it starts without, and
@@ -622,6 +635,7 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 			Control:      paths.Control,
 			DynamicPorts: paths.Control && paths.DynamicPorts,
 			BindAttach:   bindAttach,
+			VolumeAttach: paths.Control && paths.AllowVolumeAttach,
 			LiveMounts:   bindAttach || (paths.Control && feat.KeepBlobs),
 			NetQoS:       paths.Control && feat.NetQoS && isNAT,
 			NATPolicy:    paths.Control && feat.NATPolicy && isNAT,
@@ -896,6 +910,11 @@ var checkpointRetryDelays = []time.Duration{
 // Checkpoint writes a snapshot of a running sandbox. Without leaveRunning
 // the sandbox stops once the bundle is written. It returns the bundle
 // directory.
+//
+// On gvx-ctrl/2 sandboxes (State.Control == true), snapshots can be streamed
+// on demand via `rungvx checkpoint -o <dir> -z` even when Spec.Checkpoint was
+// not enabled at start, and repeated snapshots during one run each write to a
+// fresh timestamped directory instead of overwriting the pre-opened bundle dir.
 func (s *Supervisor) Checkpoint(ctx context.Context, id string, leaveRunning bool) (string, error) {
 	s.mu.Lock()
 	p := s.procs[id]
@@ -911,7 +930,7 @@ func (s *Supervisor) Checkpoint(ctx context.Context, id string, leaveRunning boo
 		s.mu.Unlock()
 		return "", errors.New("a snapshot is already in progress")
 	}
-	if p.paths.ControlSocket == "" || p.paths.CheckpointDir == "" {
+	if p.paths.ControlSocket == "" || (!p.state.Control && p.paths.CheckpointDir == "") {
 		s.mu.Unlock()
 		return "", ErrNoCheckpoint
 	}
@@ -920,36 +939,56 @@ func (s *Supervisor) Checkpoint(ctx context.Context, id string, leaveRunning boo
 		return "", errors.New("Resume the sandbox first")
 	}
 	paths := p.paths
+	stateControl := p.state.Control
 	done := p.done
 	p.checkpointing = true
 	if !leaveRunning {
 		p.stopping = true
 	}
 	s.mu.Unlock()
+	resetPending := func() {
+		s.mu.Lock()
+		p.checkpointing = false
+		if !leaveRunning && p.state.Status != Stopping {
+			p.stopping = false
+		}
+		s.mu.Unlock()
+	}
 	client := s.clientFor(p)
 	if client == nil || client.Path == "" {
-		s.mu.Lock()
-		p.checkpointing = false
-		if !leaveRunning && p.state.Status != Stopping {
-			p.stopping = false
-		}
-		s.mu.Unlock()
+		resetPending()
 		return "", rungv.ErrNotFound
 	}
-	s.Logs(id).Add(System, "── Writing snapshot to "+paths.CheckpointDir)
+	useStream := stateControl && (paths.CheckpointDir == "" || bundleComplete(paths.CheckpointDir))
+	destDir := paths.CheckpointDir
+	if useStream {
+		if err := os.MkdirAll(s.SnapshotRoot(id), 0o700); err != nil {
+			resetPending()
+			return "", err
+		}
+		destDir = s.allocateSnapshotDir(id)
+	}
+	s.Logs(id).Add(System, "── Writing snapshot to "+destDir)
 	target := rungv.Target{Socket: paths.ControlSocket, TokenFile: paths.TokenFile}
 	fail := func(err error) (string, error) {
-		s.mu.Lock()
-		p.checkpointing = false
-		if !leaveRunning && p.state.Status != Stopping {
-			p.stopping = false
+		if useStream && destDir != "" && !bundleComplete(destDir) {
+			_ = os.RemoveAll(destDir)
 		}
-		s.mu.Unlock()
+		resetPending()
 		s.Logs(id).Add(System, "snapshot failed: "+err.Error())
 		return "", err
 	}
 	for attempt := 0; ; attempt++ {
-		err := client.CheckpointTarget(ctx, target, paths.CheckpointDir, leaveRunning)
+		var err error
+		if useStream {
+			err = client.CheckpointWithOptions(ctx, target, rungv.CheckpointOptions{
+				Output:       destDir,
+				LeaveRunning: leaveRunning,
+				Compress:     true,
+			})
+		} else {
+			err = client.CheckpointTarget(ctx, target, destDir, leaveRunning)
+		}
 		if err == nil {
 			break
 		}
@@ -982,7 +1021,25 @@ func (s *Supervisor) Checkpoint(ctx context.Context, id string, leaveRunning boo
 	s.mu.Unlock()
 	s.Logs(id).Add(System, "── Snapshot written")
 	s.notify(Event{ID: id, Kind: EventChanged, State: s.State(id)})
-	return paths.CheckpointDir, nil
+	return destDir, nil
+}
+
+// allocateSnapshotDir picks a fresh timestamped bundle directory under
+// SnapshotRoot(id), disambiguating same-second snapshots with a numeric suffix.
+func (s *Supervisor) allocateSnapshotDir(id string) string {
+	root := s.SnapshotRoot(id)
+	base := time.Now().Format("20060102-150405")
+	cand := filepath.Join(root, base)
+	if _, err := os.Stat(cand); errors.Is(err, os.ErrNotExist) {
+		return cand
+	}
+	for i := 2; i <= 999; i++ {
+		cand = filepath.Join(root, fmt.Sprintf("%s-%d", base, i))
+		if _, err := os.Stat(cand); errors.Is(err, os.ErrNotExist) {
+			return cand
+		}
+	}
+	return filepath.Join(root, fmt.Sprintf("%s-%d", base, time.Now().UnixNano()))
 }
 
 // redactArgs returns a copy of args with sensitive values (secretEnv's and
@@ -1068,8 +1125,15 @@ func (s *Supervisor) Snapshots(id string) []Snapshot {
 			continue
 		}
 		snap := Snapshot{SandboxID: id, Dir: dir, Name: e.Name()}
-		if t, err := time.ParseInLocation("20060102-150405", e.Name(), time.Local); err == nil {
+		name := e.Name()
+		if t, err := time.ParseInLocation("20060102-150405", name, time.Local); err == nil {
 			snap.Time = t
+		} else if len(name) > 15 && name[15] == '-' {
+			if t, err := time.ParseInLocation("20060102-150405", name[:15], time.Local); err == nil {
+				snap.Time = t
+			} else if info, err := e.Info(); err == nil {
+				snap.Time = info.ModTime()
+			}
 		} else if info, err := e.Info(); err == nil {
 			snap.Time = info.ModTime()
 		}
@@ -1081,7 +1145,12 @@ func (s *Supervisor) Snapshots(id string) []Snapshot {
 		}
 		out = append(out, snap)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Time.Equal(out[j].Time) {
+			return out[i].Time.After(out[j].Time)
+		}
+		return out[i].Name > out[j].Name
+	})
 	return out
 }
 

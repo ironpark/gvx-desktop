@@ -23,6 +23,7 @@ type editorAction struct {
 	control      bool
 	dynamicPorts bool
 	bindAttach   bool
+	volumeAttach bool
 	netQoS       bool
 	natPolicy    bool
 	live         bool
@@ -38,6 +39,7 @@ func editorActionOf(st sandbox.State, active sandbox.Spec, hasActive bool, edite
 		control:      st.Control,
 		dynamicPorts: st.DynamicPorts,
 		bindAttach:   st.BindAttach || st.LiveMounts,
+		volumeAttach: st.VolumeAttach,
 		netQoS:       st.NetQoS,
 		natPolicy:    st.NATPolicy,
 	}
@@ -52,6 +54,9 @@ func editorActionOf(st sandbox.State, active sandbox.Spec, hasActive bool, edite
 
 func editorCaption(a editorAction) string {
 	if a.running && a.control {
+		if a.volumeAttach {
+			return tr("Resources, bandwidth, NAT policy, loopback ports, and volume/bind/tmpfs mounts apply to a running sandbox without a restart. Other settings take a restart.")
+		}
 		if a.dynamicPorts || a.bindAttach || a.netQoS || a.natPolicy {
 			return tr("Resources, bandwidth, NAT policy, loopback ports, and bind/tmpfs mounts apply to a running sandbox without a restart. Other settings take a restart.")
 		}
@@ -178,8 +183,8 @@ func editorSheet(m *Model) ggui.Widget {
 	workspace := str(func(x *Draft) *string { return &x.Workspace })
 	storage := widget.Column(
 		ui.Field(tr("Volumes"), ui.TextField(str(func(x *Draft) *string { return &x.Volumes })).Multiline().Lines(2).
-			Placeholder("pgdata:/var/lib/postgresql/data\n/disk/cache.ext4:/cache").Name(tr("Volumes"))).
-			Help(tr("NAME:/guest/path[:ro]. Each named volume is one journaled ext4 image that persists; a source with a slash is an .ext4 file at that path.")),
+			Placeholder("pgdata:/var/lib/postgresql/data\nscratch:/work:size=1g,ephemeral").Name(tr("Volumes"))).
+			Help(tr("NAME:/guest/path[:ro][,size=512m][,ephemeral]. Each named volume is one journaled ext4 image; add size= to cap growth or ephemeral for a scratch volume (rungvx v0.22+).")),
 		ui.Field(tr("Bind mounts"), ui.TextField(str(func(x *Draft) *string { return &x.Binds })).Multiline().Lines(2).
 			Placeholder("~/src:/src\n~/app.conf:/etc/app.conf:ro").Name(tr("Bind mounts"))).
 			Help(tr("HOST:/guest/path[:ro][,symlinks=contained]. A host directory or one file. Add symlinks=contained (rungvx v0.26+) to materialize safe relative symlinks on macOS and Linux. The sandbox may only reach what is mounted.")),
@@ -191,18 +196,52 @@ func editorSheet(m *Model) ggui.Widget {
 		ui.Switch(flag(func(x *Draft) *bool { return &x.WorkspaceSymlinks }), tr("Create host symbolic links in the workspace (rungvx v0.26+)")).Small(),
 		ui.Field(tr("Persistent root file system"), ui.TextField(str(func(x *Draft) *string { return &x.RootfsVolume })).Placeholder(tr("Volume name, or empty for memory")).Name(tr("Root file system volume"))).
 			Help(tr("Writes outside mounts go to memory and vanish at exit unless a root volume keeps them.")),
+		ui.Switch(flag(func(x *Draft) *bool { return &x.ReadOnlyRoot }), tr("Mount root file system read-only")).Small(),
 		ui.Field(tr("Memory mounts (tmpfs)"), ui.TextField(str(func(x *Draft) *string { return &x.Tmpfs })).Multiline().Lines(1).
 			Placeholder("/tmp:size=256m").Name(tr("tmpfs mounts"))),
 	).Gap(14).Stretch()
 
-	resources := widget.Row(
-		widget.Expanded(ui.Field(tr("Memory limit"), ui.TextField(str(func(x *Draft) *string { return &x.Memory })).Placeholder(tr("Host RAM")).Name(tr("Memory limit"))).Help(tr("512m, 2g. The guest is killed (exit 137) when it passes the limit."))),
-		widget.Expanded(ui.Field(tr("CPU limit"), ui.TextField(str(func(x *Draft) *string { return &x.CPUs })).Placeholder(tr("All CPUs")).Name(tr("CPU limit"))).Help(tr("1.5 CPUs. A hard cap on Windows only."))),
-	).Gap(12).Align(widget.AlignStart)
+	showGPU := ggui.Combine(m.RungvFeatures, d, func(f rungv.Features, x Draft) bool {
+		return f.GPU || (x.GPU != "" && x.GPU != "off")
+	})
+	gpuEnabled := ggui.Map(d, func(x Draft) bool {
+		return x.GPU != "" && x.GPU != "off"
+	})
+	resources := widget.Column(
+		widget.Row(
+			widget.Expanded(ui.Field(tr("Memory limit"), ui.TextField(str(func(x *Draft) *string { return &x.Memory })).Placeholder(tr("Host RAM")).Name(tr("Memory limit"))).Help(tr("512m, 2g. The guest is killed (exit 137) when it passes the limit."))),
+			widget.Expanded(ui.Field(tr("CPU limit"), ui.TextField(str(func(x *Draft) *string { return &x.CPUs })).Placeholder(tr("All CPUs")).Name(tr("CPU limit"))).Help(tr("1.5 CPUs. A hard cap on Windows only."))),
+			widget.Expanded(ui.Field(tr("PIDs limit"), ui.TextField(str(func(x *Draft) *string { return &x.PidsLimit })).Placeholder(tr("Unlimited")).Name(tr("PIDs limit"))).Help(tr("Max guest tasks (cgroup2 pids.max)."))),
+		).Gap(12).Align(widget.AlignStart),
+		ggui.If(showGPU, func() ggui.Widget {
+			return widget.Row(
+				widget.Expanded(ui.Field(tr("GPU acceleration"), ui.Select(d.Field(func(x *Draft) *string { return &x.GPU })).
+					Options([]string{"off", "venus", "virgl"}).Format(func(v string) string {
+					switch v {
+					case "venus":
+						return "Venus (Vulkan)"
+					case "virgl":
+						return "VirGL (OpenGL)"
+					default:
+						return tr("Off")
+					}
+				}).Name(tr("GPU acceleration")))),
+				ggui.If(gpuEnabled, func() ggui.Widget {
+					return widget.Expanded(ui.Field(tr("GPU memory limit"), ui.TextField(str(func(x *Draft) *string { return &x.GPUMemoryLimit })).Placeholder("512m").Name(tr("GPU memory limit"))).
+						Help(tr("Shared GPU memory cap, such as 512m or 2g.")))
+				}),
+			).Gap(12).Align(widget.AlignStart)
+		}),
+	).Gap(14).Stretch()
 
-	env := ui.Field(tr("Environment"), ui.TextField(str(func(x *Draft) *string { return &x.Env })).Multiline().Lines(3).
-		Placeholder("KEY=value\nHTTP_PROXY").Name(tr("Environment variables"))).
-		Help(tr("KEY=value per line. KEY alone copies the variable from this machine."))
+	env := widget.Column(
+		ui.Field(tr("Environment"), ui.TextField(str(func(x *Draft) *string { return &x.Env })).Multiline().Lines(3).
+			Placeholder("KEY=value\nHTTP_PROXY").Name(tr("Environment variables"))).
+			Help(tr("KEY=value per line. KEY alone copies the variable from this machine.")),
+		ui.Field(tr("Environment files"), ui.TextField(str(func(x *Draft) *string { return &x.EnvFiles })).Multiline().Lines(2).
+			Placeholder("~/.config/app.env").Name(tr("Environment files"))).
+			Help(tr("One host .env file path per line (--env-file).")),
+	).Gap(14).Stretch()
 
 	netSec := widget.Column(
 		ui.Field(tr("Network"), ui.ToggleGroup(network).Options([]string{"nat", "none", "wg"}).Format(func(s string) string {
