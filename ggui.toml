@@ -15,7 +15,7 @@ id = "io.github.ironpark.gvx-desktop"
 # User-visible version, one to three numbers: Info.plist's
 # CFBundleShortVersionString and CFBundleVersion, and the Windows
 # program's file and product version, where each number is at most 65535.
-version = "0.11.4"
+version = "0.12.0"
 # A square PNG, ideally 1024x1024, turned into the macOS app icon and the
 # Windows program's icon. This one is drawn to the edges from
 # assets/gvx-desktop-icon.svg by assets/svg2png.swift; macos.icon_inset

@@ -64,7 +64,7 @@ irm https://raw.githubusercontent.com/ironpark/gvx-desktop/main/install.ps1 | ie
 The script presents an interactive TUI in English, Korean, or Japanese (detected from your settings or Windows locale, or toggled with `L`), checks for running instances, verifies the SHA-256 checksum, and runs the Setup EXE when available (falling back to the portable ZIP for older releases).
 
 - **Update** by running the same command again.
-- **Install a specific version**: `$env:GVX_DESKTOP_VERSION = '0.11.4'`
+- **Install a specific version**: `$env:GVX_DESKTOP_VERSION = '0.12.0'`
 - **Choose installer language**: `$env:GVX_DESKTOP_LANG = 'en'` (`en`, `ko`, or `ja`)
 - **Non-interactive install**: `$env:GVX_DESKTOP_NONINTERACTIVE = '1'`
 - **Control Desktop shortcut**: `$env:GVX_DESKTOP_DESKTOP_SHORTCUT = '0'` (or `'1'`)
@@ -90,7 +90,7 @@ The packages add **GVX Desktop** to the application menu, install the `gvx-deskt
 Every release ships `SHA256SUMS`, per-file `.sha256` files, `BUILD_INFO.txt`, and a signed SLSA v1.0 build provenance bundle (`gvx-desktop-v<version>.sigstore.json`). Verify any downloaded artifact with the GitHub CLI:
 
 ```sh
-V=0.11.4  # release version
+V=0.12.0  # release version
 gh attestation verify "gvx-desktop-$V-macos-arm64.dmg" \
   --repo ironpark/gvx-desktop \
   --signer-workflow ironpark/gvx-desktop/.github/workflows/release.yml \

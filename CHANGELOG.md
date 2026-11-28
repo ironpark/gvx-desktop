@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-29
+
+### Added
+
+- **`gvx-ctrl/2` runtime capabilities**:
+  - **On-demand streamed checkpoints**: sandboxes running on `rungvx` builds with `checkpoint -o` support can be snapshotted at any time via compressed streamed checkpoints (`-o <dir> -z`) without pre-opening a checkpoint bundle directory at launch, and repeated snapshots during a single run write to distinct timestamped directories.
+  - **Live in-place remount & volume hotplug**: toggle existing bind, named volume, and tmpfs mounts between read-write and read-only in place (`mount remount`), hot-attach/detach named `ext4lite` volumes live when `--allow-volume-attach` is supported, and update `--pids-limit` without restarting.
+  - **Guest kernel logs (`dmesg`) & Sentry log level**: switch between **Output** and **Kernel (dmesg)** in the sandbox **Logs** tab, and adjust a running sandbox's Sentry log verbosity (`warning` / `info` / `debug`) from its action menu.
+- **New `rungvx` v0.24–v0.28 CLI options in Sandbox Editor**:
+  - Added **PIDs limit** (`--pids-limit`), **Read-only root file system** (`--read-only`), **Environment files** (`--env-file`), volume size limits and anonymous ephemeral scratch volumes (`size=...`, `ephemeral`), **Volume directory** via `-volume-dir` alongside `-cache-dir` (`rungvx` v0.24+), and host symbolic links in bind mounts via `symlinks=contained` (`rungvx` v0.26+, including a Sandbox Engine toggle in Settings).
+  - Added **GPU acceleration** (`-gpu=venus|virgl`) and **GPU memory limit** (`-gpu-memory-limit`) controls when using a GPU-enabled `rungvx` build, enforcing mutual exclusion with checkpoint/restore.
+- **macOS Apple silicon GPU extension (`-ext`) & `gvx-gpu-renderer` updater**:
+  - Added an opt-in **Include GPU extension** switch under **Settings → rungvx updates** (`darwin/arm64` Releases channel) that installs `rungvx-*-darwin-arm64-ext.tar.gz` and verifies/extracts `gvx-gpu-renderer` into `~/.gvx/libexec/gvx-gpu-renderer/`.
+  - Handles releases that omit `gvx-gpu-renderer` or `-ext` gracefully by preserving an installed renderer, falling back to the newest release carrying one, or installing standard `rungvx` when `-ext` is absent. Fully localized across all 7 UI languages.
+
+### Changed
+
+- **Toolchain & dependency updates**: updated `ggui` to `v0.9.3` (with `ggfx v0.3.2` and `svgx v0.1.1`), pinned `ggui` CLI `v0.9.2`, updated bundled Docker CLI to `29.10.1` and Docker Compose to `v5.8.1`, and refreshed Go module dependencies.
+- **Event-driven extension watching**: replaced the continuous 20 Hz (`50ms`) extension status poller with `ext.Manager.Changes()` signal notifications and a 1 Hz idle fallback.
+- **Codebase & localization hygiene**: migrated `httputil.ReverseProxy.Director` to `Rewrite`, resolved all 28 `staticcheck` findings, and removed 35 obsolete unused keys across the 6 non-English i18n catalogs.
+
+### Fixed
+
+- **Hardened archive extraction & Docker proxy validation**: extracted `gvx-gpu-renderer` tarballs through Go 1.27 `os.Root` with symlink-parent rejection and `os.Lstat` checks, enforced size limits and gzip trailer close in `rungvx`/app extractors, and rejected oversized (`>4 MiB`) `POST /containers/create` payloads in `dockerproxy` with HTTP 413 instead of bypassing bind-mount checks.
+- **Service shutdown & sandbox supervisor concurrency**: fixed shutdown races in `CloseLocalProxy`, `CloseMCPServer`, and `CloseLocalRegistry`; fixed `Supervisor.launch` overwriting `GVX_VOLUME_DIR`, concurrent start/volume TOCTOU, error-path FD/checkpoint directory leaks, and lock-order hazards in `exited`/`Stop`; and rolled back orphaned network endpoints on concurrent container removal.
+- **Feature probing & UI reliability**: avoided permanently caching launch/signal failures in `rungvx` feature probing, invalidated the feature cache after **Sign rungvx**, added generation counters and ticker cleanup to `Model`, normalized `Mount.validate` guest paths with `path.Clean`, sorted releases by semver rather than API order, and fixed the test data race in `TestSelectAndInstallSpecificRungvRelease` (32/32 packages passing `-race`).
+
 ## [0.11.4] - 2026-11-26
 
 ### Added
@@ -229,7 +256,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Initial release of GVX Desktop for Apple silicon macOS with Homebrew cask distribution.
 - Sandbox management, image registry search (Docker Hub & Quay), `ext4lite`/`hostfs` volumes, checkpoint snapshots, `rungv` installer/updater, and English & Korean UI.
 
-[Unreleased]: https://github.com/ironpark/gvx-desktop/compare/v0.11.4...HEAD
+[Unreleased]: https://github.com/ironpark/gvx-desktop/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/ironpark/gvx-desktop/compare/v0.11.4...v0.12.0
 [0.11.4]: https://github.com/ironpark/gvx-desktop/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/ironpark/gvx-desktop/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/ironpark/gvx-desktop/compare/v0.11.1...v0.11.2
