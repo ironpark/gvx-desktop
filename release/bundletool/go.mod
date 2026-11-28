@@ -1,10 +1,10 @@
 module github.com/ironpark/gvx-desktop/release/bundletool
 
-go 1.27.0
+go 1.27.4
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/goreleaser/nfpm/v2 v2.48.0
+	github.com/goreleaser/nfpm/v2 v2.49.0
 	github.com/ironpark/zapp v1.7.1
 )
 
@@ -32,7 +32,7 @@ require (
 	github.com/ironpark/zapp/pkg/signing/rcodesign/lib v1.0.1 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/kevinburke/ssh_config v1.6.0 // indirect
-	github.com/klauspost/compress v1.20.1 // indirect
+	github.com/klauspost/compress v1.20.3 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
@@ -45,7 +45,7 @@ require (
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	gitlab.com/digitalxero/go-conventional-commit v1.0.7 // indirect
 	go.digitalxero.dev/rpm v0.3.4 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
+	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect

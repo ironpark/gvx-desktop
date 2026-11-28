@@ -7,7 +7,7 @@ For installation and end-user documentation, see [README.md](README.md) ([한국
 ## Prerequisites
 
 - **Go 1.27+** (release builds pin `go1.27.4` in [release/toolchain.env](release/toolchain.env))
-- **`ggui` CLI `v0.8.1`** (for bundling, `ggui dev`, `ggui i18n check`, and `ggui record`). Install the pinned version with:
+- **`ggui` CLI `v0.9.2`** (for bundling, `ggui dev`, `ggui i18n check`, and `ggui record`). Install the pinned version with:
 
   ```sh
   ./release/repro-build.sh install-ggui
