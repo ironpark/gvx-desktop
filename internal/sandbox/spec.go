@@ -252,6 +252,9 @@ func (s Spec) Validate() error {
 	default:
 		return fmt.Errorf("Unsupported GPU mode %q (use off, venus, or virgl).", s.GPU)
 	}
+	if s.UsesGPU() && s.Checkpoint {
+		return errors.New("GPU acceleration cannot be combined with snapshots (checkpoint and restore).")
+	}
 	if strings.TrimSpace(s.GPUMemoryLimit) != "" {
 		if !s.UsesGPU() {
 			return errors.New("GPU memory limit requires GPU acceleration (venus or virgl) to be enabled.")

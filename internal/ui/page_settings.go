@@ -156,6 +156,7 @@ func settingsPage(m *Model) ggui.Widget {
 						BindDisabled(ggui.Map(m.Update, func(u Update) bool { return u.Installing })).Name(tr("Channel"))),
 				sourceFields(m),
 				releaseVersionField(m),
+				gpuExtensionField(m),
 			).Gap(12).Stretch(),
 			releaseRow(m),
 			settingRow(tr("Look for a newer rungvx when the app starts"),
@@ -289,10 +290,28 @@ func engineFacts(m *Model) ggui.Widget {
 			kvText(tr("Volumes"), e.Info.VolumeDir),
 		}
 		rows = append(rows, ggui.View(m.RungvFeatures, func(f rungv.Features) ggui.Widget {
-			if note := volumeDirNote(e, ggui.Peek(m.Settings), f.VolumeDirFlag); note != nil {
-				return note
+			var extra []ggui.Widget
+			if f.GPU || e.GPURenderer != "" {
+				var gpuVal string
+				switch {
+				case f.GPU && e.GPURenderer != "" && e.GPURendererVersion != "":
+					gpuVal = tr("enabled (gvx-gpu-renderer %s)", shortVersion(e.GPURendererVersion))
+				case f.GPU && e.GPURenderer != "":
+					gpuVal = tr("enabled (%s)", tildePath(e.GPURenderer))
+				case f.GPU:
+					gpuVal = tr("rungvx supports GPU, but gvx-gpu-renderer was not found")
+				default:
+					gpuVal = tr("standard build (gvx-gpu-renderer at %s)", tildePath(e.GPURenderer))
+				}
+				extra = append(extra, kvText(tr("GPU"), gpuVal))
 			}
-			return widget.Box()
+			if note := volumeDirNote(e, ggui.Peek(m.Settings), f.VolumeDirFlag); note != nil {
+				extra = append(extra, note)
+			}
+			if len(extra) == 0 {
+				return widget.Box()
+			}
+			return widget.Column(extra...).Gap(8).Stretch()
 		}))
 		rows = append(rows, widget.Padding(widget.Row(actions...).Gap(8), 6, 0, 0, 0))
 		return widget.Column(rows...).Gap(8).Stretch()
@@ -457,6 +476,102 @@ func releaseVersionField(m *Model) ggui.Widget {
 				tr("Install the newest release or choose a specific published version."),
 				sel)
 		})
+	})
+}
+
+// gpuExtensionField lets macOS Apple silicon users opt into rungvx's -ext
+// build and gvx-gpu-renderer bundle on the Releases channel, showing clear
+// status for releases that omit -ext or gvx-gpu-renderer.
+func gpuExtensionField(m *Model) ggui.Widget {
+	if !gpuExtensionSupported() {
+		return widget.Box()
+	}
+	isRelease := ggui.Map(m.Settings, func(s storeSettings) bool { return s.UpdateChannel != ChannelSource })
+	return ggui.If(isRelease, func() ggui.Widget {
+		gpu := ggui.Bind(
+			func() bool { return m.Settings.Get().RungvGPU },
+			func(v bool) { m.UpdateSettings(func(s *storeSettings) { s.RungvGPU = v }) },
+		)
+		installing := ggui.Map(m.Update, func(u Update) bool { return u.Installing })
+		type state struct {
+			e    Engine
+			f    rungv.Features
+			gpu  bool
+			u    Update
+			rels []rungv.Release
+			sel  string
+		}
+		combined := ggui.Derived(func() state {
+			return state{
+				e:    m.Engine.Get(),
+				f:    m.RungvFeatures.Get(),
+				gpu:  m.Settings.Get().RungvGPU,
+				u:    m.Update.Get(),
+				rels: m.Releases.Get(),
+				sel:  m.SelectedRelease.Get(),
+			}
+		}).WithEqual(func(a, b state) bool {
+			return a.e.Equal(b.e) && a.f == b.f && a.gpu == b.gpu && a.u == b.u &&
+				a.sel == b.sel && slices.EqualFunc(a.rels, b.rels, releaseEqual)
+		})
+		details := ggui.View(combined, func(s state) ggui.Widget {
+			var lines []ggui.Widget
+			var chosen rungv.Release
+			if s.sel != "" {
+				for _, r := range s.rels {
+					if r.Tag == s.sel {
+						chosen = r
+						break
+					}
+				}
+			} else if len(s.rels) > 0 {
+				chosen = newestRelease(s.rels)
+			}
+			if s.gpu && chosen.Tag != "" {
+				switch {
+				case !rungv.HasExtBuild(chosen):
+					lines = append(lines, ui.Caption(tr("Release %s does not include a GPU extension build; standard rungvx will be installed.", shortVersion(chosen.Tag))).Color(colorAmber))
+				case !rungv.HasGPURenderer(chosen):
+					lines = append(lines, ui.Caption(tr("Release %s does not include gvx-gpu-renderer; an installed copy or the newest release that has one will be used.", shortVersion(chosen.Tag))))
+				}
+			}
+			if s.e.Checked && s.e.Path != "" {
+				busy := s.u.Installing || s.u.Checking
+				switch {
+				case s.gpu && !s.f.GPU:
+					lines = append(lines, widget.Row(
+						ui.Button(tr("Reinstall with GPU"), func() { m.InstallRungvRelease(s.sel) }).Outline().Size(ui.ButtonSmall).Disabled(busy),
+						widget.Expanded(ui.Caption(tr("Installed rungvx is a standard build without GPU support."))),
+					).Gap(10).Align(widget.AlignCenter))
+				case s.gpu && s.f.GPU && s.e.GPURenderer == "":
+					lines = append(lines, widget.Row(
+						ui.Button(tr("Reinstall with GPU"), func() { m.InstallRungvRelease(s.sel) }).Outline().Size(ui.ButtonSmall).Disabled(busy),
+						widget.Expanded(ui.Caption(tr("gvx-gpu-renderer is not installed yet."))),
+					).Gap(10).Align(widget.AlignCenter))
+				case !s.gpu && s.f.GPU:
+					lines = append(lines, widget.Row(
+						ui.Button(tr("Reinstall standard"), func() { m.InstallRungvRelease(s.sel) }).Outline().Size(ui.ButtonSmall).Disabled(busy),
+						widget.Expanded(ui.Caption(tr("Installed rungvx has GPU support; reinstall to switch back to the standard build."))),
+					).Gap(10).Align(widget.AlignCenter))
+				case s.gpu && s.f.GPU && s.e.GPURenderer != "":
+					if s.e.GPURendererVersion != "" {
+						lines = append(lines, ui.Caption(tr("GPU extension ready (gvx-gpu-renderer %s).", shortVersion(s.e.GPURendererVersion))))
+					} else {
+						lines = append(lines, ui.Caption(tr("GPU extension ready (%s).", tildePath(s.e.GPURenderer))))
+					}
+				}
+			}
+			if len(lines) == 0 {
+				return widget.Box()
+			}
+			return widget.Column(lines...).Gap(6).Stretch()
+		})
+		return widget.Column(
+			settingRow(tr("Include GPU extension"),
+				tr("Installs the darwin/arm64 -ext build and gvx-gpu-renderer into ~/.gvx/libexec/gvx-gpu-renderer (macOS 26+ Apple silicon). Releases without gvx-gpu-renderer reuse an installed copy or fall back to the newest release that has one."),
+				ui.Switch(gpu, "").BindDisabled(installing).Name(tr("Include GPU extension"))),
+			details,
+		).Gap(8).Stretch()
 	})
 }
 

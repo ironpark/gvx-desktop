@@ -83,12 +83,14 @@ func ParseExtensionPage(page string) (extID, viewID string, ok bool) {
 
 // Engine is what the app knows of the rungv binary.
 type Engine struct {
-	Path    string
-	Version rungv.Version
-	Info    rungv.Info
-	Err     string
-	Loading bool
-	Checked bool
+	Path               string
+	Version            rungv.Version
+	Info               rungv.Info
+	GPURenderer        string // located gvx-gpu-renderer binary, if any
+	GPURendererVersion string // recorded release tag for GPURenderer, if known
+	Err                string
+	Loading            bool
+	Checked            bool
 }
 
 // Ready reports a binary that answered and has a backend to run on.
@@ -98,7 +100,8 @@ func (e Engine) Ready() bool {
 
 // Equal makes Engine comparable for signals.
 func (e Engine) Equal(o Engine) bool {
-	return e.Path == o.Path && e.Version == o.Version && e.Err == o.Err && e.Loading == o.Loading &&
+	return e.Path == o.Path && e.Version == o.Version && e.GPURenderer == o.GPURenderer &&
+		e.GPURendererVersion == o.GPURendererVersion && e.Err == o.Err && e.Loading == o.Loading &&
 		e.Checked == o.Checked && e.Info.DefaultBackend == o.Info.DefaultBackend &&
 		slices.Equal(e.Info.AvailableBackends, o.Info.AvailableBackends) &&
 		slices.Equal(e.Info.BackendWarnings, o.Info.BackendWarnings) &&
@@ -1111,6 +1114,8 @@ func (m *Model) DetectEngine(then func(ok bool)) {
 		}
 		r.e.Info = info
 		r.features = c.Features(ctx)
+		r.e.GPURenderer = rungv.LocateGPURenderer(path)
+		r.e.GPURendererVersion = rungv.GPURendererVersion(path)
 		return nil
 	}, func(error) {
 		m.clientMu.Lock()

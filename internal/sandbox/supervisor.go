@@ -930,6 +930,10 @@ func (s *Supervisor) Checkpoint(ctx context.Context, id string, leaveRunning boo
 		s.mu.Unlock()
 		return "", errors.New("a snapshot is already in progress")
 	}
+	if p.spec.UsesGPU() {
+		s.mu.Unlock()
+		return "", errors.New("sandboxes with GPU acceleration cannot be snapshotted")
+	}
 	if p.paths.ControlSocket == "" || (!p.state.Control && p.paths.CheckpointDir == "") {
 		s.mu.Unlock()
 		return "", ErrNoCheckpoint

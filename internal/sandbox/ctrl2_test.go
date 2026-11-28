@@ -109,6 +109,10 @@ func TestSpecValidationNewCLIFlags(t *testing.T) {
 	if err := badGPU.Validate(); err == nil {
 		t.Fatal("expected GPUMemoryLimit without GPU to fail validation")
 	}
+	badGPUCheckpoint := Spec{ID: "x", Name: "x", Image: "alpine", GPU: "venus", Checkpoint: true}
+	if err := badGPUCheckpoint.Validate(); err == nil {
+		t.Fatal("expected GPU + Checkpoint to fail validation")
+	}
 	badEphRO := Spec{
 		ID: "x", Name: "x", Image: "alpine",
 		Mounts: []Mount{{Type: MountVolume, Target: "/s", Ephemeral: true, ReadOnly: true}},
@@ -278,5 +282,17 @@ exit 0
 	}
 	if !strings.Contains(logText, "debug -S ") || !strings.Contains(logText, "--log-level info") {
 		t.Fatalf("expected debug --log-level info in log:\n%s", logText)
+	}
+
+	// 5. GPU-enabled sandbox refuses Checkpoint even with gvx-ctrl/2 control socket.
+	sup.mu.Lock()
+	sup.procs["gpu-box"] = &proc{
+		spec:  Spec{ID: "gpu-box", Name: "gpu-box", Image: "alpine", GPU: "venus"},
+		state: State{Status: Running, Control: true},
+		paths: Paths{ControlSocket: "/tmp/fake.sock"},
+	}
+	sup.mu.Unlock()
+	if _, err := sup.Checkpoint(ctx, "gpu-box", true); err == nil || !strings.Contains(err.Error(), "GPU") {
+		t.Fatalf("expected GPU sandbox Checkpoint to fail, got %v", err)
 	}
 }

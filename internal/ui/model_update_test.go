@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -169,5 +170,180 @@ func TestSelectAndInstallSpecificRungvRelease(t *testing.T) {
 	m.SetChannel(ChannelSource)
 	if got := ggui.Peek(m.SelectedRelease); got != "" {
 		t.Fatalf("SelectedRelease = %q after switching to source channel, want empty", got)
+	}
+}
+
+func TestInstallRungvWithGPUHandlesMissingRendererInRelease(t *testing.T) {
+	if !rungv.HostSupportsGPUExtension() {
+		t.Skip("GPU extension updater tests run on darwin/arm64")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("GVX_GPU_RENDERER", "")
+	dir := t.TempDir()
+
+	makeRel := func(tag string, withExt, withRenderer bool) rungv.Release {
+		assets := []rungv.Asset{
+			{Name: rungv.AssetNames(tag, "darwin", "arm64")[0]},
+			{Name: "SHA256SUMS"},
+		}
+		if withExt {
+			assets = append(assets, rungv.Asset{Name: rungv.ExtAssetName(tag, "darwin", "arm64")})
+		}
+		if withRenderer {
+			assets = append(assets, rungv.Asset{Name: rungv.GPURendererAssetName(tag, "darwin", "arm64")})
+		}
+		return rungv.Release{Tag: tag, Page: "https://example.com/" + tag, Assets: assets}
+	}
+
+	rel29NoRen := makeRel("v0.29.0", true, false) // has -ext, NO gvx-gpu-renderer
+	rel28Full := makeRel("v0.28.0", true, true)   // has -ext AND gvx-gpu-renderer
+	rel27NoExt := makeRel("v0.27.0", false, true) // NO -ext
+
+	oldReleases := fetchRungvReleases
+	oldLatest := fetchRungvLatest
+	oldInstallOpts := installRungvReleaseOpts
+	oldInstallRen := installRungvGPURenderer
+	oldSign := signRungvBinary
+	oldGPUSupp := gpuExtensionSupported
+	t.Cleanup(func() {
+		fetchRungvReleases = oldReleases
+		fetchRungvLatest = oldLatest
+		installRungvReleaseOpts = oldInstallOpts
+		installRungvGPURenderer = oldInstallRen
+		signRungvBinary = oldSign
+		gpuExtensionSupported = oldGPUSupp
+	})
+
+	gpuExtensionSupported = func() bool { return true }
+	fetchRungvReleases = func(context.Context) ([]rungv.Release, error) {
+		return []rungv.Release{rel29NoRen, rel28Full, rel27NoExt}, nil
+	}
+	fetchRungvLatest = func(context.Context) (rungv.Release, error) { return rel29NoRen, nil }
+	signRungvBinary = func(context.Context, string) error { return nil }
+
+	var (
+		mu              sync.Mutex
+		installedBinTag string
+		rendererTags    []string
+	)
+	installRungvReleaseOpts = func(_ context.Context, r rungv.Release, target string, opts rungv.InstallOptions, _ func(done, total int64)) (bool, error) {
+		mu.Lock()
+		installedBinTag = r.Tag
+		mu.Unlock()
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return false, err
+		}
+		if err := os.WriteFile(target, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+			return false, err
+		}
+		return opts.PreferExt && rungv.HasExtBuild(r), nil
+	}
+	installRungvGPURenderer = func(_ context.Context, r rungv.Release, rungvTarget string, _ func(done, total int64)) (string, error) {
+		mu.Lock()
+		rendererTags = append(rendererTags, r.Tag)
+		mu.Unlock()
+		bin := rungv.GPURendererBinary(rungvTarget)
+		if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(filepath.Join(rungv.GPURendererDir(rungvTarget), ".version"), []byte(r.Tag+"\n"), 0o644); err != nil {
+			return "", err
+		}
+		return bin, nil
+	}
+	getBinTag := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return installedBinTag
+	}
+	setBinTag := func(v string) {
+		mu.Lock()
+		installedBinTag = v
+		mu.Unlock()
+	}
+	getRendererTags := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]string, len(rendererTags))
+		copy(out, rendererTags)
+		return out
+	}
+
+	stStore := store.Store{Dir: dir}
+	set := store.DefaultSettings()
+	set.Language = LangEnglish
+	set.RungvGPU = true
+	if err := stStore.SaveSettings(set); err != nil {
+		t.Fatal(err)
+	}
+	var m *Model
+	p := ggui.ProbeBuilder(func() ggui.Widget {
+		return ggui.Provide(ggui.ReducedMotionKey, true, Build(m))
+	}, ggui.Sz(1280, 900))
+	p.Setup(func() {
+		m = NewModel(stStore, dir)
+		m.Attach(p)
+		m.Engine.Set(Engine{
+			Path:    filepath.Join(home, ".gvx", "bin", rungv.BinaryName()),
+			Checked: true,
+			Version: rungv.Version{Program: "rungvx", Version: rel27NoExt.Tag},
+			Info:    rungv.Info{OS: "darwin", AvailableBackends: []string{"hvf"}, DefaultBackend: "hvf"},
+		})
+	})
+	defer p.Close()
+	p.Frame()
+
+	waitFor := func(desc string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			p.Frame()
+			if cond() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s", desc)
+	}
+
+	m.CheckUpdate(true)
+	waitFor("releases loaded", func() bool {
+		return len(ggui.Peek(m.Releases)) == 3 && !ggui.Peek(m.Update).Checking
+	})
+
+	// 1. Install v0.29.0 (has -ext, NO renderer) with no renderer installed yet
+	//    -> installs v0.29.0 -ext and falls back to v0.28.0 for gvx-gpu-renderer.
+	m.InstallRungvRelease(rel29NoRen.Tag)
+	waitFor("v0.29.0 installed", func() bool {
+		return !ggui.Peek(m.Update).Installing && getBinTag() == rel29NoRen.Tag
+	})
+	if tags := getRendererTags(); len(tags) != 1 || tags[0] != rel28Full.Tag {
+		t.Fatalf("rendererTags = %v, want [%s]", tags, rel28Full.Tag)
+	}
+
+	// 2. Reinstall v0.29.0 now that v0.28.0 renderer is already installed
+	//    -> keeps existing renderer without re-downloading.
+	setBinTag("")
+	m.InstallRungvRelease(rel29NoRen.Tag)
+	waitFor("v0.29.0 reinstalled", func() bool {
+		return !ggui.Peek(m.Update).Installing && getBinTag() == rel29NoRen.Tag
+	})
+	if tags := getRendererTags(); len(tags) != 1 {
+		t.Fatalf("expected existing renderer to be reused without download, got calls %v", tags)
+	}
+
+	// 3. Install v0.27.0 (no -ext) -> installs standard rungvx without touching renderer.
+	setBinTag("")
+	m.InstallRungvRelease(rel27NoExt.Tag)
+	waitFor("v0.27.0 installed", func() bool {
+		return !ggui.Peek(m.Update).Installing && getBinTag() == rel27NoExt.Tag
+	})
+	if tags := getRendererTags(); len(tags) != 1 {
+		t.Fatalf("expected no renderer install for non-ext release, got calls %v", tags)
 	}
 }

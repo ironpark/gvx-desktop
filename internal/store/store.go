@@ -53,6 +53,7 @@ type Settings struct {
 	DockerPort     int    `json:"dockerPort,omitempty"`     // the host port of a tcp endpoint; 0: 2375
 	K3sServiceLB   bool   `json:"k3sServiceLB,omitempty"`   // the Kubernetes recipe runs k3s's load balancer, ServiceLB
 	UpdateChannel  string `json:"updateChannel,omitempty"`  // where rungv is updated from: release (default), source
+	RungvGPU       bool   `json:"rungvGpu,omitempty"`       // prefer darwin/arm64 -ext build and install gvx-gpu-renderer
 	SourceRepo     string `json:"sourceRepo,omitempty"`     // git repository for building rungv from source; empty: gfire-sigs/gvx
 	SourceBranch   string `json:"sourceBranch,omitempty"`   // branch or tag for building rungv from source; empty: main
 	NoUpdateCheck  bool   `json:"noUpdateCheck,omitempty"`  // do not ask GitHub for a newer rungv at launch

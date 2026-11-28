@@ -214,23 +214,31 @@ func editorSheet(m *Model) ggui.Widget {
 			widget.Expanded(ui.Field(tr("PIDs limit"), ui.TextField(str(func(x *Draft) *string { return &x.PidsLimit })).Placeholder(tr("Unlimited")).Name(tr("PIDs limit"))).Help(tr("Max guest tasks (cgroup2 pids.max)."))),
 		).Gap(12).Align(widget.AlignStart),
 		ggui.If(showGPU, func() ggui.Widget {
-			return widget.Row(
-				widget.Expanded(ui.Field(tr("GPU acceleration"), ui.Select(d.Field(func(x *Draft) *string { return &x.GPU })).
-					Options([]string{"off", "venus", "virgl"}).Format(func(v string) string {
-					switch v {
-					case "venus":
-						return "Venus (Vulkan)"
-					case "virgl":
-						return "VirGL (OpenGL)"
-					default:
-						return tr("Off")
-					}
-				}).Name(tr("GPU acceleration")))),
-				ggui.If(gpuEnabled, func() ggui.Widget {
-					return widget.Expanded(ui.Field(tr("GPU memory limit"), ui.TextField(str(func(x *Draft) *string { return &x.GPUMemoryLimit })).Placeholder("512m").Name(tr("GPU memory limit"))).
-						Help(tr("Shared GPU memory cap, such as 512m or 2g.")))
+			missingRenderer := ggui.Combine(d, m.Engine, func(x Draft, e Engine) bool {
+				return x.GPU != "" && x.GPU != "off" && e.Checked && e.Path != "" && e.GPURenderer == ""
+			})
+			return widget.Column(
+				widget.Row(
+					widget.Expanded(ui.Field(tr("GPU acceleration"), ui.Select(d.Field(func(x *Draft) *string { return &x.GPU })).
+						Options([]string{"off", "venus", "virgl"}).Format(func(v string) string {
+						switch v {
+						case "venus":
+							return "Venus (Vulkan)"
+						case "virgl":
+							return "VirGL (OpenGL)"
+						default:
+							return tr("Off")
+						}
+					}).Name(tr("GPU acceleration")))),
+					ggui.If(gpuEnabled, func() ggui.Widget {
+						return widget.Expanded(ui.Field(tr("GPU memory limit"), ui.TextField(str(func(x *Draft) *string { return &x.GPUMemoryLimit })).Placeholder("512m").Name(tr("GPU memory limit"))).
+							Help(tr("Shared GPU memory cap, such as 512m or 2g.")))
+					}),
+				).Gap(12).Align(widget.AlignStart),
+				ggui.If(missingRenderer, func() ggui.Widget {
+					return ui.Caption(tr("gvx-gpu-renderer was not found. Enable GPU extension in Settings → rungvx updates and reinstall rungvx.")).Color(colorAmber)
 				}),
-			).Gap(12).Align(widget.AlignStart)
+			).Gap(6).Stretch()
 		}),
 	).Gap(14).Stretch()
 

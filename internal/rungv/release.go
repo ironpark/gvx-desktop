@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -133,10 +132,11 @@ func InstallTarget(current string) (target string, replaces bool, err error) {
 // when not nil, hears how much of the archive has arrived. On macOS the
 // caller still signs the binary, with Sign.
 func Install(ctx context.Context, r Release, target string, progress func(done, total int64)) error {
-	a, ok := build(r)
-	if !ok {
-		return fmt.Errorf("%w (%s/%s)", ErrNoBuild, runtime.GOOS, runtime.GOARCH)
-	}
+	_, err := InstallWithOptions(ctx, r, target, InstallOptions{}, progress)
+	return err
+}
+
+func installBinaryAsset(ctx context.Context, r Release, a Asset, target string, progress func(done, total int64)) error {
 	sums, ok := r.Find("SHA256SUMS")
 	if !ok {
 		return errors.New("the release has no SHA256SUMS to check the download against")

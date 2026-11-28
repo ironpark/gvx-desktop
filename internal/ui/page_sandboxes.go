@@ -669,9 +669,12 @@ func configView(m *Model, s sandbox.Spec) ggui.Widget {
 		sec += tr(", trusts host root certificates")
 	}
 	snapSummary := tr("off")
-	if s.Checkpoint {
+	switch {
+	case s.UsesGPU():
+		snapSummary = tr("unavailable with GPU acceleration")
+	case s.Checkpoint:
 		snapSummary = tr("enabled (control socket + bundle directory)")
-	} else if ggui.Peek(m.RungvFeatures).Control {
+	case ggui.Peek(m.RungvFeatures).Control:
 		snapSummary = tr("on demand (control socket)")
 	}
 	return widget.Padding(widget.Column(
@@ -706,6 +709,11 @@ func startsWithApp(s sandbox.Spec) string {
 
 func sandboxSnapshots(m *Model, r Row) ggui.Widget {
 	id := r.Spec.ID
+	if r.Spec.UsesGPU() {
+		return widget.Padding(ui.Alert(tr("Snapshots are unavailable with GPU acceleration"),
+			tr("rungvx does not support checkpoint and restore while GPU acceleration (-gpu) is enabled. Turn GPU acceleration off to take snapshots.")).
+			Icon(icons.Info), 8, 0)
+	}
 	if !r.Spec.Checkpoint && !r.State.Control && !ggui.Peek(m.RungvFeatures).Control {
 		return widget.Padding(ui.Alert(tr("Snapshots are off for this sandbox"),
 			tr("A snapshot needs a control socket and a bundle directory opened before the guest starts. Turn snapshots on, then restart the sandbox.")).

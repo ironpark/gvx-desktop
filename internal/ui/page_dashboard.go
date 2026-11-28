@@ -141,6 +141,12 @@ func installReleaseButton(m *Model, u Update, tag, label string) *ui.ButtonWidge
 		doing := tr("Downloading… %d%%", u.Percent)
 		if u.Source {
 			doing = u.Phase
+		} else if u.Phase != "" {
+			if u.Percent > 0 {
+				doing = u.Phase + " " + itoa(u.Percent) + "%"
+			} else {
+				doing = u.Phase
+			}
 		}
 		return ui.ButtonOf(widget.Row(ui.Spinner().Size(12), widget.Text(doing)).Gap(6).Align(widget.AlignCenter), func() {}).
 			Name(label).Disabled(true)

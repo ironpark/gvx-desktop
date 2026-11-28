@@ -17,10 +17,13 @@ import (
 
 // Test hooks for rungv release lookup and installation.
 var (
-	fetchRungvReleases  = rungv.Releases
-	fetchRungvLatest    = rungv.Latest
-	installRungvRelease = rungv.Install
-	signRungvBinary     = rungv.Sign
+	fetchRungvReleases      = rungv.Releases
+	fetchRungvLatest        = rungv.Latest
+	installRungvRelease     = rungv.Install
+	installRungvReleaseOpts = rungv.InstallWithOptions
+	installRungvGPURenderer = rungv.InstallGPURenderer
+	signRungvBinary         = rungv.Sign
+	gpuExtensionSupported   = rungv.HostSupportsGPUExtension
 )
 
 func releaseEqual(a, b rungv.Release) bool {
@@ -351,7 +354,18 @@ func (m *Model) installRungv(source bool, tag string) {
 		return u
 	})
 	current := ggui.Peek(m.Engine).Path
-	var target, built string
+	wantGPU := !source && ggui.Peek(m.Settings).RungvGPU && gpuExtensionSupported()
+	recentRels := slices.Clone(ggui.Peek(m.Releases))
+	var (
+		target               string
+		built                string
+		usedExt              bool
+		rendererTag          string
+		rendererReused       bool
+		rendererFromFallback bool
+		rendererMissing      bool
+		rendererErr          error
+	)
 	work := func(ctx context.Context) error {
 		var err error
 		if target, _, err = rungv.InstallTarget(current); err != nil {
@@ -367,7 +381,7 @@ func (m *Model) installRungv(source bool, tag string) {
 				m.post(func() { m.Update.Update(func(u Update) Update { u.InstallingTag = rel.Tag; return u }) })
 			}
 			shown := -1
-			err = installRungvRelease(ctx, rel, target, func(done, total int64) {
+			onProgress := func(done, total int64) {
 				if total <= 0 {
 					return
 				}
@@ -375,7 +389,12 @@ func (m *Model) installRungv(source bool, tag string) {
 					shown = p
 					m.post(func() { m.Update.Update(func(u Update) Update { u.Percent = p; return u }) })
 				}
-			})
+			}
+			if wantGPU {
+				usedExt, err = installRungvReleaseOpts(ctx, rel, target, rungv.InstallOptions{PreferExt: true}, onProgress)
+			} else {
+				err = installRungvRelease(ctx, rel, target, onProgress)
+			}
 		}
 		if err != nil {
 			return err
@@ -384,6 +403,69 @@ func (m *Model) installRungv(source bool, tag string) {
 			// A rungv without the entitlement cannot reach the hypervisor.
 			if err := signRungvBinary(ctx, target); err != nil {
 				return errors.New(tr("rungvx was installed, but signing it failed: ") + err.Error())
+			}
+		}
+		if wantGPU && usedExt {
+			installRenderer := func(cand rungv.Release, phase string) error {
+				shown := -1
+				m.post(func() {
+					m.Update.Update(func(u Update) Update { u.Phase, u.Percent = phase, 0; return u })
+				})
+				_, rerr := installRungvGPURenderer(ctx, cand, target, func(done, total int64) {
+					if total <= 0 {
+						return
+					}
+					if p := int(done * 100 / total); p != shown {
+						shown = p
+						m.post(func() { m.Update.Update(func(u Update) Update { u.Percent = p; return u }) })
+					}
+				})
+				return rerr
+			}
+
+			if rungv.HasGPURenderer(rel) {
+				if rerr := installRenderer(rel, tr("Installing GPU renderer…")); rerr != nil {
+					if errors.Is(rerr, context.Canceled) {
+						return rerr
+					}
+					rendererErr = rerr
+				} else {
+					rendererTag = rel.Tag
+				}
+			} else {
+				// Not every gvx release publishes gvx-gpu-renderer. Preserve an
+				// already-installed renderer unless a newer release carries one,
+				// or fall back to the newest release that publishes it.
+				if len(recentRels) == 0 {
+					if fetched, ferr := fetchRungvReleases(ctx); ferr == nil {
+						recentRels = fetched
+					}
+				}
+				cand, found := rungv.FindGPURendererRelease(rel, recentRels)
+				existing := rungv.LocateGPURenderer(target)
+				existingVer := rungv.GPURendererVersion(target)
+				switch {
+				case existing != "" && (!found || existingVer == "" || !rungv.Newer(cand.Tag, existingVer)):
+					rendererReused = true
+					rendererTag = existingVer
+				case found:
+					if rerr := installRenderer(cand, tr("Installing GPU renderer…")); rerr != nil {
+						if errors.Is(rerr, context.Canceled) {
+							return rerr
+						}
+						if existing != "" {
+							rendererReused = true
+							rendererTag = existingVer
+						} else {
+							rendererErr = rerr
+						}
+					} else {
+						rendererTag = cand.Tag
+						rendererFromFallback = true
+					}
+				default:
+					rendererMissing = true
+				}
 			}
 		}
 		// A link that cannot be made leaves the install as it is: Add to
@@ -429,7 +511,24 @@ func (m *Model) installRungv(source bool, tag string) {
 			name = commitName(src.BranchName(), built)
 			m.BuildLog.Set("")
 		}
-		m.toastOK(tr("rungvx %s installed", name), target)
+		switch {
+		case wantGPU && !usedExt:
+			m.toastOK(tr("rungvx %s installed", name), tr("This release has no GPU extension build; installed standard rungvx."))
+		case wantGPU && usedExt && rendererErr != nil:
+			m.Toasts.Push(ui.Toast(tr("rungvx %s installed (GPU renderer failed)", name), rendererErr.Error()).Warning())
+		case wantGPU && usedExt && rendererMissing:
+			m.Toasts.Push(ui.Toast(tr("rungvx %s installed (GPU)", name), tr("No recent release includes gvx-gpu-renderer; install it manually to use -gpu.")).Warning())
+		case wantGPU && usedExt && rendererReused && rendererTag != "":
+			m.toastOK(tr("rungvx %s installed (GPU)", name), tr("Kept existing gvx-gpu-renderer (%s); this release does not include one.", shortVersion(rendererTag)))
+		case wantGPU && usedExt && rendererReused:
+			m.toastOK(tr("rungvx %s installed (GPU)", name), tr("Kept existing gvx-gpu-renderer; this release does not include one."))
+		case wantGPU && usedExt && rendererFromFallback:
+			m.toastOK(tr("rungvx %s installed (GPU)", name), tr("Installed gvx-gpu-renderer from %s (not included in %s).", shortVersion(rendererTag), name))
+		case wantGPU && usedExt:
+			m.toastOK(tr("rungvx %s installed (GPU)", name), tr("Installed with gvx-gpu-renderer in %s.", tildePath(rungv.GPURendererDir(target))))
+		default:
+			m.toastOK(tr("rungvx %s installed", name), target)
+		}
 		m.DetectEngine(nil)
 	}
 	go func() {
