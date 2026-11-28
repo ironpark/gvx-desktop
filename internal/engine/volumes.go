@@ -157,6 +157,10 @@ func (e *Engine) ensureVolume(ctx context.Context, name string, labels map[strin
 // container's anonymous volumes. A volume another container mounts is a
 // 409 unless force; one the engine did not make is a 403.
 func (e *Engine) removeVolume(ctx context.Context, name string, force bool) error {
+	return e.removeVolumeExcluding(ctx, name, force, "")
+}
+
+func (e *Engine) removeVolumeExcluding(ctx context.Context, name string, force bool, excludeContainerID string) error {
 	if name == e.builderVolumeName() {
 		return &apiError{http.StatusForbidden, "volume " + name + " is reserved for the sandbox engine's builder cache"}
 	}
@@ -168,7 +172,7 @@ func (e *Engine) removeVolume(ctx context.Context, name string, force bool) erro
 	}
 
 	if !force {
-		if users := e.volumeUsers(name); len(users) > 0 {
+		if users := e.volumeUsersExcept(name, excludeContainerID); len(users) > 0 {
 			return errConflict("remove %s: volume is in use - [%s]", name, strings.Join(users, ", "))
 		}
 	}
@@ -202,8 +206,15 @@ func (e *Engine) removeVolume(ctx context.Context, name string, force bool) erro
 }
 
 func (e *Engine) volumeUsers(name string) []string {
+	return e.volumeUsersExcept(name, "")
+}
+
+func (e *Engine) volumeUsersExcept(name, excludeContainerID string) []string {
 	var ids []string
 	for _, c := range e.allContainers() {
+		if excludeContainerID != "" && c.ID == excludeContainerID {
+			continue
+		}
 		for _, m := range c.Mounts {
 			if m.Type == "volume" && m.Name == name {
 				ids = append(ids, c.ID)

@@ -876,10 +876,16 @@ func (e *Engine) removeContainerCleanup(ctx context.Context, id string, stopFirs
 	e.syncOverlay()
 
 	e.ctr.mu.Lock()
-	removed := e.ctr.byID[id]
-	delete(e.ctr.byID, id)
-	_ = e.saveContainersLocked()
+	var removed *Container
+	if cur := e.ctr.byID[id]; cur != nil {
+		cp := *cur
+		removed = &cp
+	}
 	e.ctr.mu.Unlock()
+
+	// Remove rootfs and anonymous volumes before deleting the container entry
+	// from e.ctr.byID so waiters (e.g. wait?condition=removed) never observe
+	// removal complete while volume cleanup is still running.
 	if removed != nil {
 		if removed.isMicroVM() {
 			e.removeMicroVMRootfs(removed.ID)
@@ -887,12 +893,16 @@ func (e *Engine) removeContainerCleanup(ctx context.Context, id string, stopFirs
 			e.removeRootfs(*removed) // a crash before this leaves it to sweepRootfs
 		}
 	}
-
 	if removeVols {
 		for _, v := range anonVols {
-			_ = e.removeVolume(ctx, v, false)
+			_ = e.removeVolumeExcluding(ctx, v, false, id)
 		}
 	}
+
+	e.ctr.mu.Lock()
+	delete(e.ctr.byID, id)
+	_ = e.saveContainersLocked()
+	e.ctr.mu.Unlock()
 
 	e.emit(Event{Type: "container", Action: "destroy", ID: id, Attributes: attrs})
 	e.notify()
