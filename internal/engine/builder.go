@@ -93,10 +93,6 @@ type builderState struct {
 	jobs map[string]*builderJob
 }
 
-func isBuilderSandboxID(id string) bool {
-	return id == builderSandboxID || strings.HasPrefix(id, builderBuildctlPrefix)
-}
-
 func (e *Engine) builderVolumeName() string {
 	if v := strings.TrimSpace(e.cfg.BuilderVolume); v != "" {
 		return v

@@ -1235,7 +1235,8 @@ func (e *Engine) containerCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	e.ctr.mu.Lock()
-	if cur := e.ctr.byID[id]; cur != nil {
+	cur := e.ctr.byID[id]
+	if cur != nil {
 		cur.Networks = netSettings
 		if err := e.saveContainersLocked(); err != nil {
 			e.logf("engine: save containers.json: %v", err)
@@ -1243,6 +1244,12 @@ func (e *Engine) containerCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	attrs := containerAttrs(c)
 	e.ctr.mu.Unlock()
+	if cur == nil {
+		e.disconnectNetworks(id)
+		cleanupAnon()
+		writeError(w, r, errNotFound("No such container: %s", id))
+		return
+	}
 
 	e.emit(Event{Type: "container", Action: "create", ID: id, Attributes: attrs})
 	e.notify()

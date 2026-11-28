@@ -840,7 +840,8 @@ func (e *Engine) networkConnect(w http.ResponseWriter, r *http.Request) {
 		ep.MacAddress = containerMAC(cid)
 	}
 	e.ctr.mu.Lock()
-	if cur := e.ctr.byID[cid]; cur != nil {
+	cur := e.ctr.byID[cid]
+	if cur != nil {
 		if cur.Networks == nil {
 			cur.Networks = map[string]EndpointSettings{}
 		}
@@ -850,6 +851,11 @@ func (e *Engine) networkConnect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	e.ctr.mu.Unlock()
+	if cur == nil {
+		e.disconnectNetworks(cid)
+		writeError(w, r, errNotFound("No such container: %s", cid))
+		return
+	}
 	e.syncOverlay()
 	e.applyOverlayLive(cid)
 	w.WriteHeader(http.StatusOK)

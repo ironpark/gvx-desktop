@@ -476,12 +476,8 @@ func linkPanel(m *Model, l *Link, commands func(LinkView) []ggui.Widget) ggui.Wi
 	).Gap(8).Stretch()
 }
 
-// linkWords are a context's mark, its state in a few words, and what
+// linkWordsFor returns a context's mark, its state in a few words, and what
 // those leave to say.
-func linkWords(l *Link, v LinkView) (ggui.Widget, string, string) {
-	return linkWordsFor(l, v, BundledDockerState{})
-}
-
 func linkWordsFor(l *Link, v LinkView, bd BundledDockerState) (ggui.Widget, string, string) {
 	mark := func(g *icons.Glyph, c color.Color) ggui.Widget { return glyph(g, 16).Color(c) }
 	docker := l.Tool == "docker"

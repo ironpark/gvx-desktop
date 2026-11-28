@@ -346,7 +346,7 @@ func extractBuildContextForOS(body io.Reader, dstDir string, maxBytes int64, goo
 					delete(metaEntries, relSlash)
 				}
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if hdr.Size < 0 || extracted+hdr.Size > maxBytes {
 				return errInvalid("build context exceeds size limit (%d bytes)", maxBytes)
 			}

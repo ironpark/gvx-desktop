@@ -215,6 +215,7 @@ func untarBinary(archive io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	defer gz.Close()
 	tr := tar.NewReader(gz)
 	for {
 		h, err := tr.Next()
@@ -225,8 +226,14 @@ func untarBinary(archive io.Reader, out io.Writer) error {
 			return err
 		}
 		if h.Typeflag == tar.TypeReg && isBinary(h.Name) {
-			_, err := io.Copy(out, io.LimitReader(tr, maxArchive))
-			return err
+			n, err := io.Copy(out, io.LimitReader(tr, maxArchive+1))
+			if err != nil {
+				return err
+			}
+			if n > maxArchive {
+				return errors.New("rungvx binary exceeds size limit")
+			}
+			return gz.Close()
 		}
 	}
 }
@@ -249,8 +256,14 @@ func unzipBinary(archive *os.File, out io.Writer) error {
 			return err
 		}
 		defer rc.Close()
-		_, err = io.Copy(out, io.LimitReader(rc, maxArchive))
-		return err
+		n, err := io.Copy(out, io.LimitReader(rc, maxArchive+1))
+		if err != nil {
+			return err
+		}
+		if n > maxArchive {
+			return errors.New("rungvx binary exceeds size limit")
+		}
+		return nil
 	}
 	return errors.New("the archive holds no rungvx")
 }

@@ -366,12 +366,9 @@ func (p *Proxy) checkCreate(w http.ResponseWriter, r *http.Request) (*http.Reque
 	// Expect: 100-continue; strip it so the backend does not emit a second 100.
 	r.Header.Del("Expect")
 	if len(buf) > maxCheckBody {
-		// Larger than the cap: pass through untouched without calling Check.
-		r.Body = &multiReadCloser{
-			Reader: io.MultiReader(bytes.NewReader(buf), origBody),
-			Closer: origBody,
-		}
-		return r, true
+		_ = origBody.Close()
+		writeDockerError(w, r, http.StatusRequestEntityTooLarge, fmt.Sprintf("container create request body exceeds %d bytes", maxCheckBody))
+		return r, false
 	}
 	_ = origBody.Close()
 	if p.Rewrite != nil {

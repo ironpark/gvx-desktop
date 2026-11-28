@@ -147,15 +147,6 @@ func companionSpecs(target, goos string) []companionSpec {
 	}
 }
 
-// driverLibraryTarget returns the Zig renderer library path for target on goos.
-func driverLibraryTarget(target, goos string) string {
-	specs := companionSpecs(target, goos)
-	if len(specs) == 0 {
-		return ""
-	}
-	return specs[0].target
-}
-
 // stageProgram downloads the archive of rel for goos and goarch beside
 // target, and unpacks its program (and any bundled driver library / Docker CLI
 // binaries present) there, at programPaths' fresh.
@@ -303,6 +294,7 @@ func untarProgram(archive io.Reader, exeDst string, specs []companionSpec) ([]st
 	if err != nil {
 		return nil, err
 	}
+	defer gz.Close()
 	tr := tar.NewReader(gz)
 	wantExe := "usr/bin/" + Package
 	byPath := make(map[string]companionSpec, len(specs))

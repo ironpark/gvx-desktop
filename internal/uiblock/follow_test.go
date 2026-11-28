@@ -35,7 +35,6 @@ func TestFollowCoalescingDiffAndGone(t *testing.T) {
 		mu.Unlock()
 	}
 
-	var updates []Update
 	updCh := make(chan Update, 16)
 	sendFn := func(u Update) error {
 		updCh <- u
@@ -49,7 +48,6 @@ func TestFollowCoalescingDiffAndGone(t *testing.T) {
 
 	// 1. Initial full tree (Seq == 1).
 	u1 := <-updCh
-	updates = append(updates, u1)
 	if u1.Seq != 1 || u1.Tree == nil || u1.Tree.Text != "v1" || len(u1.Ops) != 0 || u1.Chrome != "toolbar" {
 		t.Fatalf("u1 = %+v", u1)
 	}
@@ -60,7 +58,6 @@ func TestFollowCoalescingDiffAndGone(t *testing.T) {
 	bump(func(v *View) { v.Tree = &Node{Kind: KindText, Text: "v3"} })
 
 	u2 := <-updCh
-	updates = append(updates, u2)
 	if u2.Seq != 2 || u2.Tree != nil || len(u2.Ops) != 1 || u2.Ops[0].Op != OpUpdate || u2.Ops[0].Node.Text != "v3" {
 		t.Fatalf("u2 = %+v", u2)
 	}

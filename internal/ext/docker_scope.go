@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -3744,13 +3743,4 @@ func writeDockerJSONError(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(struct {
 		Message string `json:"message"`
 	}{Message: msg})
-}
-
-// parsePositivePort parses a TCP port string safely.
-func parsePositivePort(s string) (int, bool) {
-	n, err := strconv.Atoi(s)
-	if err != nil || n <= 0 || n > 65535 {
-		return 0, false
-	}
-	return n, true
 }

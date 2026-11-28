@@ -300,7 +300,11 @@ func applyUpdateToSpec(spec *Spec, u rungv.Update) {
 		spec.IsolateLAN = *u.IsolateLAN
 	}
 	if u.PidsLimit != nil {
-		spec.PidsLimit = *u.PidsLimit
+		if *u.PidsLimit < 0 {
+			spec.PidsLimit = 0
+		} else {
+			spec.PidsLimit = *u.PidsLimit
+		}
 	}
 	if u.NetTXBPS != nil {
 		spec.NetTXBPS = *u.NetTXBPS
@@ -624,7 +628,7 @@ func ComputeLiveDiff(running, edited Spec, st State) (LiveDiff, bool) {
 		case MountTmpfs:
 			return st.Control
 		case MountBind:
-			return st.Control && (st.BindAttach || st.LiveMounts)
+			return st.Control && (st.BindAttach || st.LiveMounts) && m.Symlinks == ""
 		case MountVolume:
 			return st.Control && st.VolumeAttach && !m.Ephemeral && m.Size == ""
 		default:
@@ -946,11 +950,24 @@ func (s *Supervisor) startServeMount(ctx context.Context, id string, p *proc, cl
 		sp.exitErr = waitErr
 		sp.stderr = errBuf.String()
 		close(sp.done)
+		var dropped bool
 		s.mu.Lock()
 		if p.serves[key] == sp {
 			delete(p.serves, key)
+			if !p.servesClosed && s.procs[id] == p && p.state.Status.Active() {
+				p.spec.Mounts = removeMountFromSpec(p.spec.Mounts, m.Target)
+				dropped = true
+			}
 		}
 		s.mu.Unlock()
+		if dropped {
+			if msg := strings.TrimSpace(sp.stderr); msg != "" {
+				s.Logs(id).Add(System, fmt.Sprintf("── Live mount %s ended: %s", m.Target, msg))
+			} else if waitErr != nil {
+				s.Logs(id).Add(System, fmt.Sprintf("── Live mount %s ended: %v", m.Target, waitErr))
+			}
+			s.notify(Event{ID: id, Kind: EventChanged, State: s.State(id)})
+		}
 	}()
 
 	grace := time.NewTimer(mountServeSilentGrace)
@@ -1148,6 +1165,9 @@ func (s *Supervisor) Remount(ctx context.Context, id string, guestTarget string,
 	s.mu.Lock()
 	if s.procs[id] == p && p.state.Status.Active() {
 		want := path.Clean(strings.TrimSpace(guestTarget))
+		if want == "/workspace" && p.spec.Workspace != "" {
+			p.spec.WorkspaceRO = readOnly
+		}
 		for i := range p.spec.Mounts {
 			if p.spec.Mounts[i].Target == guestTarget || (want != "" && path.Clean(strings.TrimSpace(p.spec.Mounts[i].Target)) == want) {
 				p.spec.Mounts[i].ReadOnly = readOnly

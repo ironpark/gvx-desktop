@@ -272,11 +272,12 @@ func (c *Client) output(ctx context.Context, args ...string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-// runFlags and restoreFlags hold, by the path of a rungv, the usage text of its
-// run and restore commands.
+// runFlags, restoreFlags, and checkpointFlags hold, by the path of a rungv,
+// the usage text of its run, restore, and checkpoint commands.
 var (
-	runFlags     sync.Map
-	restoreFlags sync.Map
+	runFlags        sync.Map
+	restoreFlags    sync.Map
+	checkpointFlags sync.Map
 )
 
 func commandUsage(ctx context.Context, cache *sync.Map, subcmd, binPath string) (string, bool) {
@@ -291,11 +292,17 @@ func commandUsage(ctx context.Context, cache *sync.Map, subcmd, binPath string) 
 		cmd.WaitDelay = time.Second // a rungv that does not print its usage and leave
 		hideWindow(cmd)
 		out, err := cmd.CombinedOutput() // the usage may come with a failing exit
-		if ctx.Err() != nil {
+		if runCtx.Err() != nil {
 			return "", false
 		}
-		if len(out) == 0 && errors.Is(err, os.ErrNotExist) {
-			return "", false
+		if len(out) == 0 && err != nil {
+			// Skip caching launch failures (ENOENT, EACCES) and signal kills
+			// (e.g., macOS arm64 SIGKILL on an unsigned binary), while still
+			// caching normal exits (such as exit 2 with empty output).
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() < 0 {
+				return "", false
+			}
 		}
 		usage = string(out)
 		cache.Store(binPath, usage)
@@ -303,17 +310,21 @@ func commandUsage(ctx context.Context, cache *sync.Map, subcmd, binPath string) 
 	return usage.(string), true
 }
 
-func hasCommandFlag(ctx context.Context, cache *sync.Map, subcmd, binPath, name string) bool {
-	usage, ok := commandUsage(ctx, cache, subcmd, binPath)
-	if !ok {
-		return false
-	}
+func usageHasFlag(usage, name string) bool {
 	for line := range strings.SplitSeq(usage, "\n") {
 		if f := strings.Fields(line); len(f) > 0 && f[0] == "-"+name && strings.HasPrefix(line, "  -") {
 			return true
 		}
 	}
 	return false
+}
+
+func hasCommandFlag(ctx context.Context, cache *sync.Map, subcmd, binPath, name string) bool {
+	usage, ok := commandUsage(ctx, cache, subcmd, binPath)
+	if !ok {
+		return false
+	}
+	return usageHasFlag(usage, name)
 }
 
 // HasRunUsage reports whether this rungv's run -help output contains substr.
@@ -343,6 +354,16 @@ func (c *Client) HasRestoreFlag(ctx context.Context, name string) bool {
 		return false
 	}
 	return hasCommandFlag(ctx, &restoreFlags, "restore", c.Path, name)
+}
+
+// HasCheckpointFlag reports whether this rungv's checkpoint command takes the
+// flag name, written without its dash (e.g. "o" for streamed gvx-ctrl/2
+// checkpoints). The usage text is read once for each binary.
+func (c *Client) HasCheckpointFlag(ctx context.Context, name string) bool {
+	if c == nil {
+		return false
+	}
+	return hasCommandFlag(ctx, &checkpointFlags, "checkpoint", c.Path, name)
 }
 
 // Stream runs a command and hands every line of stdout and stderr to line,

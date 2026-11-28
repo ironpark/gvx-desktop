@@ -98,6 +98,14 @@ func TestComputeLiveDiffRemount(t *testing.T) {
 	if _, live := ComputeLiveDiff(runVol, edVolEph, stVol); live {
 		t.Fatal("expected ephemeral volume mount to require restart")
 	}
+
+	// 8. Bind mount with symlinks=contained cannot be attached live (requires restart).
+	stBind := State{Status: Running, Control: true, BindAttach: true}
+	edBindAddSym := runBind.Clone()
+	edBindAddSym.Mounts = append(edBindAddSym.Mounts, Mount{Type: MountBind, Source: "/tmp/sym", Target: "/sym", Symlinks: SymlinksContained})
+	if _, live := ComputeLiveDiff(runBind, edBindAddSym, stBind); live {
+		t.Fatal("expected bind mount with Symlinks=contained to require restart")
+	}
 }
 
 func TestSpecValidationNewCLIFlags(t *testing.T) {
@@ -119,6 +127,49 @@ func TestSpecValidationNewCLIFlags(t *testing.T) {
 	}
 	if err := badEphRO.Validate(); err == nil {
 		t.Fatal("expected ephemeral read-only volume to fail validation")
+	}
+	for _, tc := range []struct {
+		name string
+		spec Spec
+	}{
+		{"dup trailing slash", Spec{ID: "x", Name: "x", Image: "alpine", Mounts: []Mount{
+			{Type: MountTmpfs, Target: "/data"},
+			{Type: MountTmpfs, Target: "/data/"},
+		}}},
+		{"reserved traversal", Spec{ID: "x", Name: "x", Image: "alpine", Mounts: []Mount{
+			{Type: MountTmpfs, Target: "/foo/../proc"},
+		}}},
+		{"dev shm prefix bypass", Spec{ID: "x", Name: "x", Image: "alpine", Mounts: []Mount{
+			{Type: MountTmpfs, Target: "/dev/shmfoo"},
+		}}},
+		{"invalid tmpfs size", Spec{ID: "x", Name: "x", Image: "alpine", Mounts: []Mount{
+			{Type: MountTmpfs, Target: "/scratch", Size: "not-a-size"},
+		}}},
+	} {
+		if err := tc.spec.Validate(); err == nil {
+			t.Fatalf("%s: expected validation error", tc.name)
+		}
+	}
+	// /dev/shm itself and subpaths remain allowed.
+	if err := (Spec{ID: "x", Name: "x", Image: "alpine", Mounts: []Mount{{Type: MountTmpfs, Target: "/dev/shm", Size: "64m"}}}).Validate(); err != nil {
+		t.Fatalf("/dev/shm should be allowed, got %v", err)
+	}
+	// Negative PidsLimit update normalizes to 0 (unlimited) so Validate succeeds.
+	neg := int64(-1)
+	uSpec := Spec{ID: "x", Name: "x", Image: "alpine", PidsLimit: 64}
+	applyUpdateToSpec(&uSpec, rungv.Update{PidsLimit: &neg})
+	if uSpec.PidsLimit != 0 {
+		t.Fatalf("PidsLimit after -1 update = %d, want 0", uSpec.PidsLimit)
+	}
+	if err := uSpec.Validate(); err != nil {
+		t.Fatalf("spec invalid after PidsLimit=-1 update: %v", err)
+	}
+	// CompareSnapshots breaks same-second ties numerically (-10 newer than -9).
+	ts := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	s9 := Snapshot{Name: "20261128-120000-9", Time: ts}
+	s10 := Snapshot{Name: "20261128-120000-10", Time: ts}
+	if CompareSnapshots(s10, s9) >= 0 {
+		t.Fatalf("expected -10 to sort before (newer than) -9")
 	}
 	okSpec := Spec{
 		ID: "x", Name: "x", Image: "alpine",
@@ -149,6 +200,14 @@ Usage: rungvx run [flags] IMAGE
   -control-socket string
   -control-token-file string
   -dynamic-ports
+EOF
+  exit 2
+fi
+if [ "$cmd" = "checkpoint" ] && [ "$2" = "-help" ]; then
+  cat <<'EOF'
+Usage: rungvx checkpoint [flags]
+  -o string
+  -z
 EOF
   exit 2
 fi
@@ -284,15 +343,18 @@ exit 0
 		t.Fatalf("expected debug --log-level info in log:\n%s", logText)
 	}
 
-	// 5. GPU-enabled sandbox refuses Checkpoint even with gvx-ctrl/2 control socket.
+	// 5. GPU-enabled sandbox refuses Checkpoint & Restore even with gvx-ctrl/2 control socket.
 	sup.mu.Lock()
 	sup.procs["gpu-box"] = &proc{
 		spec:  Spec{ID: "gpu-box", Name: "gpu-box", Image: "alpine", GPU: "venus"},
-		state: State{Status: Running, Control: true},
+		state: State{Status: Running, Control: true, CheckpointStream: true},
 		paths: Paths{ControlSocket: "/tmp/fake.sock"},
 	}
 	sup.mu.Unlock()
 	if _, err := sup.Checkpoint(ctx, "gpu-box", true); err == nil || !strings.Contains(err.Error(), "GPU") {
 		t.Fatalf("expected GPU sandbox Checkpoint to fail, got %v", err)
+	}
+	if err := sup.Restore(Spec{ID: "gpu-res", Name: "gpu-res", Image: "alpine", GPU: "venus"}, dir1); err == nil || !strings.Contains(err.Error(), "GPU") {
+		t.Fatalf("expected GPU sandbox Restore to fail, got %v", err)
 	}
 }

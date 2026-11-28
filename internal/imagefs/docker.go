@@ -111,7 +111,7 @@ func OpenDocker(ctx context.Context, host, imageID string, progress func(entries
 			ensureDir(parent)
 
 			var kind Kind
-			var mode uint32 = uint32(hdr.Mode) & 0o7777
+			mode := uint32(hdr.Mode) & 0o7777
 			switch hdr.Typeflag {
 			case tar.TypeDir:
 				kind = KindDir

@@ -747,12 +747,8 @@ func resolveUnixForwardBind(src, dst string, opts mountPlanOptions) (string, boo
 	return "", false
 }
 
-// planMounts parses and validates Binds, Mounts, Tmpfs and Config.Volumes
-// without side effects, returning the planned mounts to apply.
-func planMounts(hc HostConfig, cfg ContainerConfig) ([]plannedMount, error) {
-	return planMountsWithOptions(hc, cfg, mountPlanOptions{})
-}
-
+// planMountsWithOptions parses and validates Binds, Mounts, Tmpfs and
+// Config.Volumes without side effects, returning the planned mounts to apply.
 func planMountsWithOptions(hc HostConfig, cfg ContainerConfig, opts mountPlanOptions) ([]plannedMount, error) {
 	var planned []plannedMount
 	targets := map[string]bool{}

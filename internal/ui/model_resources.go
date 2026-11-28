@@ -1250,16 +1250,11 @@ func DraftFrom(s sandbox.Spec) Draft {
 	return d
 }
 
-func mountLine(src, dst string, ro bool) string {
-	l := src + ":" + dst
-	if ro {
-		l += ":ro"
-	}
-	return l
-}
-
 func volumeMountLine(src, dst string, ro bool, size string, ephemeral bool) string {
-	l := src + ":" + dst
+	l := dst
+	if src != "" {
+		l = src + ":" + dst
+	}
 	var opts []string
 	if ro {
 		opts = append(opts, "ro")
@@ -1602,14 +1597,24 @@ func (d Draft) Spec() (sandbox.Spec, error) {
 		s.Mounts = append(s.Mounts, sandbox.Mount{Type: sandbox.MountBind, Source: src, Target: dst, ReadOnly: ro, Symlinks: sym})
 	}
 	for _, l := range lines(d.Tmpfs) {
-		target, opts, _ := strings.Cut(l, ":")
-		mt := sandbox.Mount{Type: sandbox.MountTmpfs, Target: target}
-		for o := range strings.SplitSeq(opts, ",") {
-			switch {
-			case strings.HasPrefix(o, "size="):
-				mt.Size = strings.TrimPrefix(o, "size=")
-			case o == "ro":
-				mt.ReadOnly = true
+		target, opts, hasOpts := strings.Cut(l, ":")
+		mt := sandbox.Mount{Type: sandbox.MountTmpfs, Target: strings.TrimSpace(target)}
+		if hasOpts {
+			for o := range strings.SplitSeq(opts, ",") {
+				o = strings.TrimSpace(o)
+				if o == "" {
+					continue
+				}
+				switch {
+				case strings.HasPrefix(o, "size="):
+					mt.Size = strings.TrimPrefix(o, "size=")
+				case o == "ro":
+					mt.ReadOnly = true
+				case o == "rw":
+					mt.ReadOnly = false
+				default:
+					return s, fmt.Errorf("tmpfs %q: unknown option %q (use size=... or ro)", l, o)
+				}
 			}
 		}
 		s.Mounts = append(s.Mounts, mt)

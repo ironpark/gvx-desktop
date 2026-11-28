@@ -242,12 +242,17 @@ type hostAPIConfig struct {
 	events              *hostEventHub
 }
 
+type snapRefLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
 type hostAPIServer struct {
 	cfg       hostAPIConfig
 	mux       *http.ServeMux
 	mu        sync.Mutex
 	snapMu    sync.Mutex
-	snapLocks map[string]*sync.Mutex
+	snapLocks map[string]*snapRefLock
 	closed    bool
 	ln        net.Listener
 	srv       *http.Server
@@ -272,7 +277,7 @@ func newHostAPIServer(cfg hostAPIConfig) *hostAPIServer {
 	closeCtx, closeStop := context.WithCancel(context.Background())
 	s := &hostAPIServer{
 		cfg:       cfg,
-		snapLocks: make(map[string]*sync.Mutex),
+		snapLocks: make(map[string]*snapRefLock),
 		closeCtx:  closeCtx,
 		closeStop: closeStop,
 	}
@@ -280,18 +285,29 @@ func newHostAPIServer(cfg hostAPIConfig) *hostAPIServer {
 	return s
 }
 
-func (s *hostAPIServer) snapLock(sbxID string) *sync.Mutex {
+func (s *hostAPIServer) lockSnap(sbxID string) func() {
 	s.snapMu.Lock()
-	defer s.snapMu.Unlock()
 	if s.snapLocks == nil {
-		s.snapLocks = make(map[string]*sync.Mutex)
+		s.snapLocks = make(map[string]*snapRefLock)
 	}
-	m, ok := s.snapLocks[sbxID]
+	rl, ok := s.snapLocks[sbxID]
 	if !ok {
-		m = &sync.Mutex{}
-		s.snapLocks[sbxID] = m
+		rl = &snapRefLock{}
+		s.snapLocks[sbxID] = rl
 	}
-	return m
+	rl.refs++
+	s.snapMu.Unlock()
+
+	rl.mu.Lock()
+	return func() {
+		rl.mu.Unlock()
+		s.snapMu.Lock()
+		rl.refs--
+		if rl.refs == 0 && s.snapLocks[sbxID] == rl {
+			delete(s.snapLocks, sbxID)
+		}
+		s.snapMu.Unlock()
+	}
 }
 
 func (s *hostAPIServer) Handler() http.Handler {
@@ -1255,9 +1271,8 @@ func (s *hostAPIServer) handleSandboxDelete(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	id := r.PathValue("id")
-	sbxMu := s.snapLock(id)
-	sbxMu.Lock()
-	defer sbxMu.Unlock()
+	unlockSnap := s.lockSnap(id)
+	defer unlockSnap()
 
 	_, ok := s.findOwnedSandbox(id)
 	if !ok {
@@ -1624,9 +1639,8 @@ func (s *hostAPIServer) handleSnapshotCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	sbxMu := s.snapLock(id)
-	sbxMu.Lock()
-	defer sbxMu.Unlock()
+	unlockSnap := s.lockSnap(id)
+	defer unlockSnap()
 
 	spec, ok := s.findOwnedSandbox(id)
 	if !ok {
@@ -1667,9 +1681,8 @@ func (s *hostAPIServer) handleSnapshotList(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	id := r.PathValue("id")
-	sbxMu := s.snapLock(id)
-	sbxMu.Lock()
-	defer sbxMu.Unlock()
+	unlockSnap := s.lockSnap(id)
+	defer unlockSnap()
 
 	spec, ok := s.findOwnedSandbox(id)
 	if !ok {
@@ -1737,55 +1750,54 @@ func (s *hostAPIServer) handleSandboxRestore(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	sbxMu := s.snapLock(id)
-	sbxMu.Lock()
+	unlockSnap := s.lockSnap(id)
 	s.policyRLock()
 	if s.closingOrCancelled(r) {
 		s.policyRUnlock()
-		sbxMu.Unlock()
+		unlockSnap()
 		writeHostError(w, http.StatusServiceUnavailable, "unavailable", "host API server is closing")
 		return
 	}
 	if !s.requirePermission(w, PermSnapshots) || !s.requirePermission(w, PermSandboxes) {
 		s.policyRUnlock()
-		sbxMu.Unlock()
+		unlockSnap()
 		return
 	}
 	spec, ok := s.findOwnedSandbox(id)
 	if !ok {
 		s.policyRUnlock()
-		sbxMu.Unlock()
+		unlockSnap()
 		writeHostError(w, http.StatusForbidden, "permission_denied", fmt.Sprintf("sandbox %q is not owned by this extension", id))
 		return
 	}
 	if err := s.validateSandboxSpecCapabilitiesLocked(&spec); err != nil {
 		s.policyRUnlock()
-		sbxMu.Unlock()
+		unlockSnap()
 		writeHostError(w, http.StatusForbidden, "permission_denied", err.Error())
 		return
 	}
 	if s.cfg.supervisor == nil {
 		s.policyRUnlock()
-		sbxMu.Unlock()
+		unlockSnap()
 		writeHostError(w, http.StatusServiceUnavailable, "unavailable", "sandbox supervisor is unavailable")
 		return
 	}
 	dir, ok := s.resolveSnapshotDirLocked(id, strings.TrimSpace(req.Snapshot))
 	if !ok {
 		s.policyRUnlock()
-		sbxMu.Unlock()
+		unlockSnap()
 		writeHostError(w, http.StatusNotFound, "not_found", fmt.Sprintf("snapshot %q not found", req.Snapshot))
 		return
 	}
 	if err := validateRestoreManifestAllowedMounts(dir, s.cfg.extID, s.cfg.dataDir, s.cfg.grants); err != nil {
 		s.policyRUnlock()
-		sbxMu.Unlock()
+		unlockSnap()
 		writeHostError(w, http.StatusForbidden, "permission_denied", err.Error())
 		return
 	}
 	if s.closingOrCancelled(r) {
 		s.policyRUnlock()
-		sbxMu.Unlock()
+		unlockSnap()
 		writeHostError(w, http.StatusServiceUnavailable, "unavailable", "host API server is closing")
 		return
 	}
@@ -1793,7 +1805,7 @@ func (s *hostAPIServer) handleSandboxRestore(w http.ResponseWriter, r *http.Requ
 	_ = s.cfg.supervisor.Stop(id, 5*time.Second)
 	err := s.cfg.supervisor.Restore(spec, dir)
 	s.policyRUnlock()
-	sbxMu.Unlock()
+	unlockSnap()
 	if err != nil {
 		writeHostError(w, http.StatusInternalServerError, "restore_failed", err.Error())
 		return
@@ -1823,9 +1835,8 @@ func (s *hostAPIServer) handleSnapshotDelete(w http.ResponseWriter, r *http.Requ
 	id := r.PathValue("id")
 	name := r.PathValue("name")
 
-	sbxMu := s.snapLock(id)
-	sbxMu.Lock()
-	defer sbxMu.Unlock()
+	unlockSnap := s.lockSnap(id)
+	defer unlockSnap()
 
 	if _, ok := s.findOwnedSandbox(id); !ok {
 		writeHostError(w, http.StatusForbidden, "permission_denied", fmt.Sprintf("sandbox %q is not owned by this extension", id))

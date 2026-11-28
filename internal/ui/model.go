@@ -394,6 +394,8 @@ type Model struct {
 	dirty     atomic.Bool
 	scheduled atomic.Bool
 	logSeq    int64
+	detectGen int
+	dmesgGen  int
 	quitting  bool
 
 	runCLI                                     cliRunner                                                                     // runs docker and kubectl; tests replace it
@@ -440,6 +442,7 @@ type Model struct {
 	localReg                                   *localreg.Server
 	localRegPort                               int // 0 -> recipes.RegistryPort (5001); <0 -> ephemeral 127.0.0.1:0 (tests)
 	localRegDesired                            bool
+	localRegClosed                             bool
 	localRegWant                               bool
 	localRegInFlight                           string
 	localRegSyncGen                            int
@@ -452,6 +455,7 @@ type Model struct {
 	localProxy           *localproxy.Server
 	localProxyTestPorts  bool // when true, bind ephemeral 127.0.0.1:0 ports (tests)
 	localProxyDesired    bool
+	localProxyClosed     bool
 	localProxyWant       bool
 	localProxyWantHTTP   int
 	localProxyWantHTTPS  int
@@ -466,6 +470,7 @@ type Model struct {
 	mcpSrv       *mcpserver.Server
 	mcpTestPort  int // when <0, bind ephemeral 127.0.0.1:0 port (tests)
 	mcpDesired   bool
+	mcpClosed    bool
 	mcpWant      bool
 	mcpWantPort  int
 	mcpBoundPort int // configured port the current mcpSrv was created for
@@ -827,6 +832,7 @@ func NewModel(st store.Store, dataDir string) *Model {
 				control:      run && st.Control,
 				dynamicPorts: run && st.DynamicPorts,
 				bindAttach:   run && (st.BindAttach || st.LiveMounts),
+				volumeAttach: run && st.VolumeAttach,
 				netQoS:       run && st.NetQoS,
 				natPolicy:    run && st.NATPolicy,
 			}
@@ -880,10 +886,13 @@ func wrapCommand(args []string) string {
 func takesValue(flag string) bool {
 	switch flag {
 	case "-ro", "-isolate-lan", "--host-ca-certs", "--privileged=false",
+		"-read-only", "--read-only",
 		"-auto-publish", "--auto-publish",
 		"-dynamic-ports", "--dynamic-ports",
 		"-allow-bind-attach", "--allow-bind-attach",
-		"-keep-blobs", "--keep-blobs":
+		"-allow-volume-attach", "--allow-volume-attach",
+		"-keep-blobs", "--keep-blobs",
+		"-i", "-t":
 		return false
 	}
 	return true
@@ -1073,11 +1082,18 @@ func (m *Model) Start() {
 		m.CheckUpdate(true)
 	}
 	m.startAppUpdates()
+	stopNow := make(chan struct{})
+	ggui.OnCleanup(func() { close(stopNow) })
 	go func() {
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
-		for range t.C {
-			m.post(func() { m.Now.Set(time.Now()) })
+		for {
+			select {
+			case <-stopNow:
+				return
+			case <-t.C:
+				m.post(func() { m.Now.Set(time.Now()) })
+			}
 		}
 	}()
 }
@@ -1085,6 +1101,8 @@ func (m *Model) Start() {
 // DetectEngine looks for rungv and asks it about the host.
 func (m *Model) DetectEngine(then func(ok bool)) {
 	set := ggui.Peek(m.Settings)
+	m.detectGen++
+	gen := m.detectGen
 	m.Engine.Update(func(e Engine) Engine { e.Loading = true; return e })
 	type result struct {
 		e        Engine
@@ -1118,6 +1136,9 @@ func (m *Model) DetectEngine(then func(ok bool)) {
 		r.e.GPURendererVersion = rungv.GPURendererVersion(path)
 		return nil
 	}, func(error) {
+		if m.detectGen != gen {
+			return
+		}
 		m.clientMu.Lock()
 		if r.e.Err == "" {
 			m.client = r.c
@@ -1160,6 +1181,10 @@ func (m *Model) SignRungv() {
 			m.toastError(tr("Signing failed"), err)
 			return
 		}
+		rungv.ForgetFeatures(path)
+		if abs, err := filepath.Abs(path); err == nil && abs != path {
+			rungv.ForgetFeatures(abs)
+		}
 		m.toastOK(tr("rungvx signed"), tr("Hypervisor.framework access is granted."))
 		m.DetectEngine(nil)
 	})
@@ -1173,6 +1198,10 @@ func (m *Model) onEvent(e sandbox.Event) {
 		m.post(func() { m.announce(e) })
 	case sandbox.EventReady, sandbox.EventExited:
 		m.post(func() {
+			if e.Kind == sandbox.EventExited && ggui.Peek(m.Selected) == e.ID {
+				m.DmesgMode.Set(false)
+				m.DmesgLines.Set(nil)
+			}
 			m.refreshStates()
 			m.announce(e)
 		})
@@ -1534,13 +1563,6 @@ func (m *Model) activeSpec(id string) (sandbox.Spec, bool) {
 	return sandbox.Spec{}, false
 }
 
-func (m *Model) updateSandbox(ctx context.Context, id string, u rungv.Update) (rungv.Resources, error) {
-	if m.updateSandboxFn != nil {
-		return m.updateSandboxFn(ctx, id, u)
-	}
-	return m.sup.Update(ctx, id, u)
-}
-
 func (m *Model) applyLiveSandbox(ctx context.Context, id string, diff sandbox.LiveDiff) error {
 	if m.applyLiveFn != nil {
 		return m.applyLiveFn(ctx, id, diff)
@@ -1548,7 +1570,8 @@ func (m *Model) applyLiveSandbox(ctx context.Context, id string, diff sandbox.Li
 	if m.updateSandboxFn != nil && !diff.Update.IsZero() &&
 		diff.NATPolicyFile == "" &&
 		len(diff.AddPorts) == 0 && len(diff.RemovePorts) == 0 &&
-		len(diff.AddMounts) == 0 && len(diff.RemoveMounts) == 0 {
+		len(diff.AddMounts) == 0 && len(diff.RemoveMounts) == 0 &&
+		len(diff.RemountMounts) == 0 {
 		_, err := m.updateSandboxFn(ctx, id, diff.Update)
 		return err
 	}
@@ -1559,6 +1582,8 @@ func liveDiffToastDesc(diff sandbox.LiveDiff) string {
 	if diff.NATPolicyFile == "" &&
 		len(diff.AddPorts) == 0 && len(diff.RemovePorts) == 0 &&
 		len(diff.AddMounts) == 0 && len(diff.RemoveMounts) == 0 &&
+		len(diff.RemountMounts) == 0 &&
+		diff.Update.PidsLimit == nil &&
 		diff.Update.NetTXBPS == nil && diff.Update.NetRXBPS == nil {
 		return tr("The running sandbox has the new memory, CPU and LAN settings.")
 	}
@@ -1897,6 +1922,8 @@ func (m *Model) LoadSandboxDmesg(id string) {
 	if id == "" {
 		return
 	}
+	m.dmesgGen++
+	gen := m.dmesgGen
 	m.DmesgLoading.Set(true)
 	var out string
 	m.async(func(ctx context.Context) error {
@@ -1906,6 +1933,9 @@ func (m *Model) LoadSandboxDmesg(id string) {
 		out, err = m.sup.Dmesg(dCtx, id, rungv.DmesgOptions{Tail: 500})
 		return err
 	}, func(err error) {
+		if m.dmesgGen != gen {
+			return
+		}
 		m.DmesgLoading.Set(false)
 		if ggui.Peek(m.Selected) != id {
 			return
@@ -1986,7 +2016,7 @@ func (m *Model) LoadSnapshots() {
 		for _, s := range specs {
 			snaps = append(snaps, m.sup.Snapshots(s.ID)...)
 		}
-		slices.SortFunc(snaps, func(a, b sandbox.Snapshot) int { return b.Time.Compare(a.Time) })
+		slices.SortFunc(snaps, sandbox.CompareSnapshots)
 		return nil
 	}, func(error) {
 		m.Snapshots.Set(snaps)

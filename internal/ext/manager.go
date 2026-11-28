@@ -123,13 +123,14 @@ type Manager struct {
 	installMu   sync.Mutex // strictly ordered before rec.opMu -> m.mu; never acquired by Close()
 	sandboxesMu sync.Mutex
 
-	mu      sync.RWMutex
-	exts    map[string]*extRecord
-	started bool
-	closed  bool
-	baseCtx context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	mu       sync.RWMutex
+	exts     map[string]*extRecord
+	started  bool
+	closed   bool
+	baseCtx  context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	changeCh chan struct{}
 }
 
 // NewManager creates an extension host Manager rooted at cfg.DataDir.
@@ -146,7 +147,24 @@ func NewManager(cfg Config) (*Manager, error) {
 		exts:     make(map[string]*extRecord),
 		baseCtx:  ctx,
 		cancel:   cancel,
+		changeCh: make(chan struct{}, 1),
 	}, nil
+}
+
+// Changes returns a coalesced notification channel signaled whenever extension
+// state, routes, or build logs change.
+func (m *Manager) Changes() <-chan struct{} {
+	return m.changeCh
+}
+
+func (m *Manager) signalChange() {
+	if m == nil || m.changeCh == nil {
+		return
+	}
+	select {
+	case m.changeCh <- struct{}{}:
+	default:
+	}
 }
 
 // Start discovers installed extensions under DataDir and launches approved extensions.
@@ -852,6 +870,7 @@ func (m *Manager) buildOrPullLocked(ctx context.Context, rec *extRecord) error {
 		m.mu.Lock()
 		rec.appendBuildLog(line)
 		m.mu.Unlock()
+		m.signalChange()
 	}
 
 	if rec.manifest.Runtime.Dockerfile != "" && (rec.source.Kind == SourceGit || rec.source.Kind == SourceLocal) {
@@ -2568,6 +2587,7 @@ func (m *Manager) buildInfoLocked(rec *extRecord) ExtensionInfo {
 }
 
 func (m *Manager) notifyChanged() {
+	m.signalChange()
 	if m.cfg.UIHost != nil {
 		m.cfg.UIHost.Changed()
 	}

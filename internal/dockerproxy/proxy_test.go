@@ -1476,3 +1476,29 @@ func TestNotifyChangedCoalesces(t *testing.T) {
 		t.Fatalf("NotifyChanged fired %d times, want 1 coalesced call", got)
 	}
 }
+
+func TestCreateRejectsOversizedBodyInsteadOfBypassingCheck(t *testing.T) {
+	var backendHit atomic.Bool
+	be := startFakeBackend(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendHit.Store(true)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	_, _, client := startProxy(t, be, func(p *Proxy) {
+		p.Check = func(_ *http.Request, _ []byte) error {
+			return fmt.Errorf("should not reach check for oversized body")
+		}
+	})
+
+	big := bytes.Repeat([]byte("a"), maxCheckBody+1024)
+	resp, err := client.Post("http://docker/v1.47/containers/create", "application/json", bytes.NewReader(big))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusRequestEntityTooLarge)
+	}
+	if backendHit.Load() {
+		t.Fatal("oversized /containers/create bypassed Check and reached backend")
+	}
+}

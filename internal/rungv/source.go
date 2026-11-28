@@ -428,7 +428,9 @@ func BuildFromSource(ctx context.Context, src Source, dir, target string, phase 
 	if err := run(dir, nil, git, "clean", "-fdx"); err != nil {
 		return "", err
 	}
-	sha, err := exec.CommandContext(ctx, git, "-C", dir, "rev-parse", "HEAD").Output()
+	revCmd := exec.CommandContext(ctx, git, "-C", dir, "rev-parse", "HEAD")
+	hideWindow(revCmd)
+	sha, err := revCmd.Output()
 	if err != nil {
 		return "", err
 	}

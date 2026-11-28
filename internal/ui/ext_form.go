@@ -50,36 +50,6 @@ func (f *blockForm) redraw() {
 	f.drawnDialogs = map[string]bool{}
 }
 
-func (f *blockForm) reset() {
-	if f == nil {
-		return
-	}
-	f.fields = map[string]*ggui.StateValue[string]{}
-	f.given = map[string]string{}
-	f.drawn = map[string]bool{}
-	f.locals = map[string]*ggui.StateValue[string]{}
-	f.localGiven = map[string]string{}
-	f.dialogs = map[string]*ggui.StateValue[bool]{}
-	f.drawnDialogs = map[string]bool{}
-	f.graphs = map[string]*graphViewState{}
-	f.dags = map[string]*dagViewState{}
-}
-
-func (f *blockForm) copyFrom(src *blockForm) {
-	if src == nil || src == f || f == nil {
-		return
-	}
-	f.fields = src.fields
-	f.given = src.given
-	f.drawn = src.drawn
-	f.locals = src.locals
-	f.localGiven = src.localGiven
-	f.dialogs = src.dialogs
-	f.drawnDialogs = src.drawnDialogs
-	f.graphs = src.graphs
-	f.dags = src.dags
-}
-
 // field returns the persistent signal for form node id. If the extension sends
 // a changed default value (given), it updates the signal; otherwise user edits
 // survive across view updates.

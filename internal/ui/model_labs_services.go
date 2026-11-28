@@ -454,7 +454,7 @@ func (m *Model) reconcileLocalProxy(want bool, cfgHTTP, cfgHTTPS int, op string)
 		defer m.localProxyOpMu.Unlock()
 
 		m.localProxyMu.Lock()
-		desired := m.localProxyDesired
+		desired := m.localProxyDesired && !m.localProxyClosed
 		wantHTTP := m.localProxyWantHTTP
 		wantHTTPS := m.localProxyWantHTTPS
 		routesCopy := slices.Clone(m.localProxyRoutes)
@@ -592,14 +592,18 @@ func (m *Model) RetryLocalProxy() {
 // CloseLocalProxy stops the local proxy cleanly on shutdown.
 func (m *Model) CloseLocalProxy() {
 	m.localProxyMu.Lock()
+	m.localProxyClosed = true
 	m.localProxyDesired = false
+	m.localProxyMu.Unlock()
+
+	m.localProxyOpMu.Lock()
+	defer m.localProxyOpMu.Unlock()
+	m.localProxyMu.Lock()
 	srv := m.localProxy
 	m.localProxyMu.Unlock()
 	if srv == nil {
 		return
 	}
-	m.localProxyOpMu.Lock()
-	defer m.localProxyOpMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = srv.Stop(ctx)
@@ -793,8 +797,11 @@ func (m *Model) syncMCPServerWith(set store.Settings, forceRetry bool) {
 	}
 
 	running := srv != nil && srv.Running()
+	m.mcpMu.Lock()
+	inFlight := m.mcpInFlight
+	m.mcpMu.Unlock()
 	if wantRunning {
-		if running && !portChanged && m.mcpInFlight != "stop" {
+		if running && !portChanged && inFlight != "stop" {
 			addr := srv.Addr()
 			ep := srv.EndpointURL()
 			port := srv.Port()
@@ -814,7 +821,7 @@ func (m *Model) syncMCPServerWith(set store.Settings, forceRetry bool) {
 			})
 			return
 		}
-		if m.mcpInFlight == "start" && !forceRetry && !portChanged {
+		if inFlight == "start" && !forceRetry && !portChanged {
 			return
 		}
 		if !forceRetry && !portChanged && wasWant && ggui.Peek(m.MCPServer).Err != "" {
@@ -824,7 +831,7 @@ func (m *Model) syncMCPServerWith(set store.Settings, forceRetry bool) {
 		return
 	}
 
-	if !running && m.mcpInFlight != "start" {
+	if !running && inFlight != "start" {
 		m.MCPServer.Update(func(st MCPServerState) MCPServerState {
 			st.Enabled = false
 			st.Running = false
@@ -836,7 +843,7 @@ func (m *Model) syncMCPServerWith(set store.Settings, forceRetry bool) {
 		})
 		return
 	}
-	if m.mcpInFlight == "stop" {
+	if inFlight == "stop" {
 		return
 	}
 	m.reconcileMCPServer(false, cfgPort, "stop")
@@ -846,11 +853,10 @@ func (m *Model) reconcileMCPServer(want bool, cfgPort int, op string) {
 	m.mcpMu.Lock()
 	m.mcpDesired = want
 	m.mcpWantPort = cfgPort
-	m.mcpMu.Unlock()
-
 	m.mcpSyncGen++
 	gen := m.mcpSyncGen
 	m.mcpInFlight = op
+	m.mcpMu.Unlock()
 
 	var (
 		runningAfter bool
@@ -865,7 +871,7 @@ func (m *Model) reconcileMCPServer(want bool, cfgPort int, op string) {
 		defer m.mcpOpMu.Unlock()
 
 		m.mcpMu.Lock()
-		desired := m.mcpDesired
+		desired := m.mcpDesired && !m.mcpClosed
 		wantPort := m.mcpWantPort
 		srv := m.mcpSrv
 		boundPort := m.mcpBoundPort
@@ -939,11 +945,13 @@ func (m *Model) reconcileMCPServer(want bool, cfgPort int, op string) {
 		statsAfter = srv.Stats()
 		return err
 	}, func(err error) {
-		if m.mcpSyncGen != gen {
-			return
+		m.mcpMu.Lock()
+		stale := m.mcpSyncGen != gen
+		if !stale {
+			m.mcpInFlight = ""
 		}
-		m.mcpInFlight = ""
-		if m.quitting {
+		m.mcpMu.Unlock()
+		if stale || m.quitting {
 			return
 		}
 		m.MCPServer.Update(func(st MCPServerState) MCPServerState {
@@ -998,14 +1006,18 @@ func (m *Model) RetryMCPServer() {
 // CloseMCPServer stops the built-in MCP server cleanly on shutdown.
 func (m *Model) CloseMCPServer() {
 	m.mcpMu.Lock()
+	m.mcpClosed = true
 	m.mcpDesired = false
+	m.mcpMu.Unlock()
+
+	m.mcpOpMu.Lock()
+	defer m.mcpOpMu.Unlock()
+	m.mcpMu.Lock()
 	srv := m.mcpSrv
 	m.mcpMu.Unlock()
 	if srv == nil {
 		return
 	}
-	m.mcpOpMu.Lock()
-	defer m.mcpOpMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = srv.Stop(ctx)
@@ -1081,7 +1093,7 @@ func sandboxInfoFrom(spec sandbox.Spec, st sandbox.State, snap mcpSnapshot) mcps
 		Image:      spec.Image,
 		Status:     status,
 		Paused:     st.Paused,
-		Checkpoint: (spec.Checkpoint || st.Control) && !spec.UsesGPU(),
+		Checkpoint: (spec.Checkpoint || st.CheckpointStream) && !spec.UsesGPU(),
 		Ports:      ports,
 		Recipe:     spec.Recipe,
 		LocalURL:   localProxyHTTPSURLFor(snap.proxyRunning, snap.proxyHTTPSPort, snap.proxyRoutes, "sandbox", spec.Name),

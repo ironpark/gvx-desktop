@@ -44,9 +44,9 @@ var (
 // on a prompt nobody answers.
 const opTimeout = 20 * time.Second
 
-// EnvVar, set to "file", has a node keep its secrets in a file of its own
-// even when the system has a keychain: for a headless node, or a harness
-// that must not touch the user's keychain.
+// EnvVar is the environment variable that, when set to "file", has a node keep
+// its secrets in a file of its own even when the system has a keychain: for a
+// headless node, or a harness that must not touch the user's keychain.
 const EnvVar = "GVX_KEYCHAIN"
 
 // System is the system's store of secrets, or nil and why there is none.

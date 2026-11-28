@@ -537,15 +537,16 @@ func gpuExtensionField(m *Model) ggui.Widget {
 			}
 			if s.e.Checked && s.e.Path != "" {
 				busy := s.u.Installing || s.u.Checking
+				canInstallExt := chosen.Tag == "" || rungv.HasExtBuild(chosen)
 				switch {
 				case s.gpu && !s.f.GPU:
 					lines = append(lines, widget.Row(
-						ui.Button(tr("Reinstall with GPU"), func() { m.InstallRungvRelease(s.sel) }).Outline().Size(ui.ButtonSmall).Disabled(busy),
+						ui.Button(tr("Reinstall with GPU"), func() { m.InstallRungvRelease(s.sel) }).Outline().Size(ui.ButtonSmall).Disabled(busy || !canInstallExt),
 						widget.Expanded(ui.Caption(tr("Installed rungvx is a standard build without GPU support."))),
 					).Gap(10).Align(widget.AlignCenter))
 				case s.gpu && s.f.GPU && s.e.GPURenderer == "":
 					lines = append(lines, widget.Row(
-						ui.Button(tr("Reinstall with GPU"), func() { m.InstallRungvRelease(s.sel) }).Outline().Size(ui.ButtonSmall).Disabled(busy),
+						ui.Button(tr("Reinstall with GPU"), func() { m.InstallRungvRelease(s.sel) }).Outline().Size(ui.ButtonSmall).Disabled(busy || !canInstallExt),
 						widget.Expanded(ui.Caption(tr("gvx-gpu-renderer is not installed yet."))),
 					).Gap(10).Align(widget.AlignCenter))
 				case !s.gpu && s.f.GPU:

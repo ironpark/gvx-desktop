@@ -162,11 +162,6 @@ func podsView(m *Model) ggui.Widget {
 	).Gap(16).Stretch()
 }
 
-// kubeGate words the Pods page while the cluster does not run.
-func kubeGate() gateWords {
-	return kubeGateFor(KubePods)
-}
-
 func kubeGateFor(v int) gateWords {
 	g := gateWords{
 		recipe: recipes.Kubernetes, page: PageKubernetes, icon: lucide.Hexagon,

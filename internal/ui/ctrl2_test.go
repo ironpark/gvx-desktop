@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ironpark/gvx-desktop/internal/rungv"
 	"github.com/ironpark/gvx-desktop/internal/sandbox"
 )
 
@@ -34,7 +35,7 @@ func TestDraftRoundTripNewCLIFlags(t *testing.T) {
 	if d.GPU != "venus" || d.GPUMemoryLimit != "1g" {
 		t.Fatalf("Draft GPU = (%q, %q), want (venus, 1g)", d.GPU, d.GPUMemoryLimit)
 	}
-	if !strings.Contains(d.Volumes, "pgdata:/var/lib/pg:size=4g") || !strings.Contains(d.Volumes, ":/scratch:size=512m,ephemeral") {
+	if !strings.Contains(d.Volumes, "pgdata:/var/lib/pg:size=4g") || !strings.Contains(d.Volumes, "/scratch:size=512m,ephemeral") {
 		t.Fatalf("Draft.Volumes = %q", d.Volumes)
 	}
 
@@ -104,5 +105,25 @@ func TestEditorActionLivePidsAndVolumeAttach(t *testing.T) {
 	}
 	if cap := editorCaption(act); !strings.Contains(cap, "volume/bind/tmpfs") {
 		t.Fatalf("editorCaption = %q, want mention of volume/bind/tmpfs", cap)
+	}
+}
+
+func TestVolumeMountLineAnonymousEphemeralAndNewestReleaseSemver(t *testing.T) {
+	line := volumeMountLine("", "/work", false, "512m", true)
+	if line != "/work:size=512m,ephemeral" {
+		t.Fatalf("volumeMountLine(anonymous) = %q, want /work:size=512m,ephemeral", line)
+	}
+	src, dst, ro, size, eph, err := parseVolumeMount(line)
+	if err != nil || src != "" || dst != "/work" || ro || size != "512m" || !eph {
+		t.Fatalf("parseVolumeMount(%q) = (%q, %q, %v, %q, %v, %v)", line, src, dst, ro, size, eph, err)
+	}
+
+	got := newestRelease([]rungv.Release{
+		{Tag: "v0.27.2"},
+		{Tag: "v0.28.0"},
+		{Tag: "v0.29.0-rc1", Prerelease: true},
+	})
+	if got.Tag != "v0.28.0" {
+		t.Fatalf("newestRelease = %q, want v0.28.0", got.Tag)
 	}
 }

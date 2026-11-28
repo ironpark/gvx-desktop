@@ -298,8 +298,3 @@ func atoi(s string) int {
 	}
 	return n
 }
-
-// todo answers 501 for an endpoint whose workstream has not written it.
-func (e *Engine) todo(w http.ResponseWriter, r *http.Request, workstream string) {
-	writeError(w, r, &apiError{http.StatusNotImplemented, r.Method + " " + stripVersion(cleanPath(r.URL.Path)) + ": TODO(workstream " + workstream + ")"})
-}

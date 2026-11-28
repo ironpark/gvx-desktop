@@ -2657,7 +2657,7 @@ func TestManager_InstallLocalSerializedWithAllowAndBuild(t *testing.T) {
 	}
 
 	close(builder.release)
-	_ = <-buildDone // startLocked fails without supervisor, which is expected; build phase already completed.
+	<-buildDone // startLocked fails without supervisor, which is expected; build phase already completed.
 	if err := <-installDone; err != nil {
 		t.Fatalf("InstallLocal(v2) failed after AllowAndBuild released: %v", err)
 	}

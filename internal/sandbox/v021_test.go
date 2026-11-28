@@ -353,6 +353,9 @@ if [ "$1" = "run" ] && [ "$2" = "-help" ]; then
   echo "  -dynamic-ports"
   exit 2
 fi
+if [ "$2" = "-help" ]; then
+  exit 2
+fi
 exec sleep 30
 `
 	if err := os.WriteFile(binV20, []byte(v20Script), 0o755); err != nil {

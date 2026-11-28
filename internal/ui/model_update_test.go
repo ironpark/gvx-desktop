@@ -62,9 +62,14 @@ func TestSelectAndInstallSpecificRungvRelease(t *testing.T) {
 		return rel23, nil
 	}
 	signRungvBinary = func(context.Context, string) error { return nil }
-	var installedTag string
+	var (
+		tagMu        sync.Mutex
+		installedTag string
+	)
 	installRungvRelease = func(_ context.Context, r rungv.Release, target string, progress func(done, total int64)) error {
+		tagMu.Lock()
 		installedTag = r.Tag
+		tagMu.Unlock()
 		if progress != nil {
 			progress(50, 100)
 			progress(100, 100)
@@ -146,7 +151,10 @@ func TestSelectAndInstallSpecificRungvRelease(t *testing.T) {
 	m.SetSelectedRelease(rel22.Tag)
 	m.InstallRungvRelease(rel22.Tag)
 	waitFor("install finished", func() bool {
-		return installedTag == rel22.Tag && !ggui.Peek(m.Update).Installing
+		tagMu.Lock()
+		got := installedTag
+		tagMu.Unlock()
+		return got == rel22.Tag && !ggui.Peek(m.Update).Installing
 	})
 	if got := ggui.Peek(m.Update).Tag; got != rel23.Tag {
 		t.Fatalf("Update.Tag changed after installing older release: got %q, want %q", got, rel23.Tag)

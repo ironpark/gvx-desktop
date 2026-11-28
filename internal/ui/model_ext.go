@@ -169,27 +169,49 @@ func (m *Model) startWatchPoller(mgr *ext.Manager) {
 		lastRoutes := mgr.LocalProxyRoutes()
 		lastBuild := buildLogCounts(mgr, lastList)
 
-		ticker := time.NewTicker(50 * time.Millisecond)
-		defer ticker.Stop()
+		changes := mgr.Changes()
+		pollInterval := func() time.Duration {
+			if len(lastBuild) > 0 {
+				return 100 * time.Millisecond
+			}
+			return time.Second
+		}
+		timer := time.NewTimer(pollInterval())
+		defer timer.Stop()
+
+		check := func() {
+			curList := mgr.List()
+			curSec := mgr.SecretStoreStatus()
+			curRoutes := mgr.LocalProxyRoutes()
+			curBuild := buildLogCounts(mgr, curList)
+			if !extensionsEqual(lastList, curList) ||
+				lastSec != curSec ||
+				!slices.EqualFunc(lastRoutes, curRoutes, localproxy.Route.Equal) ||
+				!maps.Equal(lastBuild, curBuild) {
+				lastList = curList
+				lastSec = curSec
+				lastRoutes = curRoutes
+				lastBuild = curBuild
+				m.post(m.refreshExtensions)
+			}
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				curList := mgr.List()
-				curSec := mgr.SecretStoreStatus()
-				curRoutes := mgr.LocalProxyRoutes()
-				curBuild := buildLogCounts(mgr, curList)
-				if !extensionsEqual(lastList, curList) ||
-					lastSec != curSec ||
-					!slices.EqualFunc(lastRoutes, curRoutes, localproxy.Route.Equal) ||
-					!maps.Equal(lastBuild, curBuild) {
-					lastList = curList
-					lastSec = curSec
-					lastRoutes = curRoutes
-					lastBuild = curBuild
-					m.post(m.refreshExtensions)
+			case <-changes:
+				check()
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
 				}
+				timer.Reset(pollInterval())
+			case <-timer.C:
+				check()
+				timer.Reset(pollInterval())
 			}
 		}
 	}()
@@ -482,9 +504,9 @@ func (m *Model) extensionBuildKitHandler() http.Handler {
 		},
 	}
 	return &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			req.URL.Scheme = "http"
-			req.URL.Host = "docker"
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = "http"
+			pr.Out.URL.Host = "docker"
 		},
 		Transport: trp,
 	}

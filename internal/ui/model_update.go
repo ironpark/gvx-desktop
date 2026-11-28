@@ -306,15 +306,29 @@ func (m *Model) CheckUpdate(quiet bool) {
 	})
 }
 
-// newestRelease picks the first non-prerelease entry in rels, or rels[0] if
-// every listed release is a prerelease.
+// newestRelease picks the highest-versioned non-prerelease entry in rels, or
+// the highest-versioned prerelease if every listed release is a prerelease.
 func newestRelease(rels []rungv.Release) rungv.Release {
+	var best rungv.Release
+	var found bool
 	for _, r := range rels {
 		if !r.Prerelease {
-			return r
+			if !found || rungv.Newer(r.Tag, best.Tag) {
+				best = r
+				found = true
+			}
 		}
 	}
-	return rels[0]
+	if found {
+		return best
+	}
+	for _, r := range rels {
+		if !found || rungv.Newer(r.Tag, best.Tag) {
+			best = r
+			found = true
+		}
+	}
+	return best
 }
 
 // InstallRungv installs the newest rungv of the channel — a release
@@ -359,6 +373,7 @@ func (m *Model) installRungv(source bool, tag string) {
 	var (
 		target               string
 		built                string
+		binaryReplaced       bool
 		usedExt              bool
 		rendererTag          string
 		rendererReused       bool
@@ -399,6 +414,7 @@ func (m *Model) installRungv(source bool, tag string) {
 		if err != nil {
 			return err
 		}
+		binaryReplaced = true
 		if runtime.GOOS == "darwin" {
 			// A rungv without the entitlement cannot reach the hypervisor.
 			if err := signRungvBinary(ctx, target); err != nil {
@@ -436,12 +452,13 @@ func (m *Model) installRungv(source bool, tag string) {
 				// Not every gvx release publishes gvx-gpu-renderer. Preserve an
 				// already-installed renderer unless a newer release carries one,
 				// or fall back to the newest release that publishes it.
-				if len(recentRels) == 0 {
-					if fetched, ferr := fetchRungvReleases(ctx); ferr == nil {
+				cand, found := rungv.FindGPURendererRelease(rel, recentRels)
+				if !found && len(recentRels) <= 1 {
+					if fetched, ferr := fetchRungvReleases(ctx); ferr == nil && len(fetched) > 0 {
 						recentRels = fetched
+						cand, found = rungv.FindGPURendererRelease(rel, recentRels)
 					}
 				}
-				cand, found := rungv.FindGPURendererRelease(rel, recentRels)
 				existing := rungv.LocateGPURenderer(target)
 				existingVer := rungv.GPURendererVersion(target)
 				switch {
@@ -488,8 +505,21 @@ func (m *Model) installRungv(source bool, tag string) {
 			m.release = rel
 		}
 		if err != nil {
+			if binaryReplaced && target != "" {
+				set := ggui.Peek(m.Settings)
+				if found, _ := rungv.Locate(set.RungvPath); found != target {
+					m.UpdateSettings(func(s *storeSettings) { s.RungvPath = target })
+				}
+			}
 			if errors.Is(err, context.Canceled) {
-				m.Toasts.Push(ui.Toast(tr("Build canceled"), tr("The rungvx installation was canceled.")).Info())
+				title := tr("Installation canceled")
+				if source {
+					title = tr("Build canceled")
+				}
+				m.Toasts.Push(ui.Toast(title, tr("The rungvx installation was canceled.")).Info())
+				if binaryReplaced {
+					m.DetectEngine(nil)
+				}
 				return
 			}
 			if errors.Is(err, rungv.ErrNoToolchain) {

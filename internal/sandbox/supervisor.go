@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -103,6 +104,10 @@ type State struct {
 	BindAttach bool
 	// VolumeAttach reports that the run started with --allow-volume-attach (live ext4lite volume mounts).
 	VolumeAttach bool
+	// CheckpointStream reports that this rungvx supports streamed gvx-ctrl/2
+	// checkpoints (`rungvx checkpoint -o <dir> -z`) without pre-opening a
+	// bundle directory at launch.
+	CheckpointStream bool
 	// LiveMounts reports that the run supports live host bind mounts via
 	// --allow-bind-attach (POSIX SCM_RIGHTS) or `rungv mount serve` (rpcfs,
 	// including on Windows).
@@ -118,18 +123,18 @@ type State struct {
 }
 
 // Equal makes State comparable for signals.
-func (s State) Equal(o State) bool {
-	if !slices.Equal(s.Ports, o.Ports) || !slices.Equal(s.Busy, o.Busy) {
+func (st State) Equal(o State) bool {
+	if !slices.Equal(st.Ports, o.Ports) || !slices.Equal(st.Busy, o.Busy) {
 		return false
 	}
-	return s.Status == o.Status && s.PID == o.PID && s.StartedAt.Equal(o.StartedAt) &&
-		s.ReadyAt.Equal(o.ReadyAt) && s.ExitedAt.Equal(o.ExitedAt) && s.ExitCode == o.ExitCode &&
-		s.Error == o.Error && s.Advice == o.Advice && s.Platform == o.Platform &&
-		s.Restored == o.Restored && s.LogSeq == o.LogSeq && s.Signal == o.Signal &&
-		s.Control == o.Control && s.Paused == o.Paused &&
-		s.DynamicPorts == o.DynamicPorts && s.BindAttach == o.BindAttach &&
-		s.VolumeAttach == o.VolumeAttach &&
-		s.LiveMounts == o.LiveMounts && s.NetQoS == o.NetQoS && s.NATPolicy == o.NATPolicy
+	return st.Status == o.Status && st.PID == o.PID && st.StartedAt.Equal(o.StartedAt) &&
+		st.ReadyAt.Equal(o.ReadyAt) && st.ExitedAt.Equal(o.ExitedAt) && st.ExitCode == o.ExitCode &&
+		st.Error == o.Error && st.Advice == o.Advice && st.Platform == o.Platform &&
+		st.Restored == o.Restored && st.LogSeq == o.LogSeq && st.Signal == o.Signal &&
+		st.Control == o.Control && st.Paused == o.Paused &&
+		st.DynamicPorts == o.DynamicPorts && st.BindAttach == o.BindAttach &&
+		st.VolumeAttach == o.VolumeAttach && st.CheckpointStream == o.CheckpointStream &&
+		st.LiveMounts == o.LiveMounts && st.NetQoS == o.NetQoS && st.NATPolicy == o.NATPolicy
 }
 
 // Event is a change the supervisor reports.
@@ -178,9 +183,10 @@ type Supervisor struct {
 	// It must not block. The log buffers get the same output either way.
 	Output func(id string, o Output)
 
-	mu    sync.Mutex
-	procs map[string]*proc
-	logs  map[string]*LogBuffer
+	mu       sync.Mutex
+	procs    map[string]*proc
+	starting map[string]Spec
+	logs     map[string]*LogBuffer
 }
 
 type proc struct {
@@ -474,6 +480,9 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
+	if restoreDir != "" && spec.UsesGPU() {
+		return errors.New("sandboxes with GPU acceleration cannot be restored from snapshots")
+	}
 	client := s.Client()
 	if client == nil || client.Path == "" {
 		return rungv.ErrNotFound
@@ -483,11 +492,24 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("%s is already running", spec.Name)
 	}
+	if _, busy := s.starting[spec.ID]; busy {
+		s.mu.Unlock()
+		return fmt.Errorf("%s is already starting", spec.Name)
+	}
 	if other := s.volumeHolderLocked(spec); other != "" {
 		s.mu.Unlock()
 		return fmt.Errorf("a volume of %s is in use by the running sandbox %s", spec.Name, other)
 	}
+	if s.starting == nil {
+		s.starting = map[string]Spec{}
+	}
+	s.starting[spec.ID] = spec.Clone()
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.starting, spec.ID)
+		s.mu.Unlock()
+	}()
 
 	if err := spec.Prepare(); err != nil {
 		return err
@@ -505,12 +527,16 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 	if err != nil {
 		return err
 	}
+	createdCheckpointDir := ""
+	if restoreDir == "" && paths.CheckpointDir != "" {
+		createdCheckpointDir = paths.CheckpointDir
+	}
 	isNAT := spec.Network == "" || spec.Network == "nat"
 	paths.DynamicPorts = feat.DynamicPorts && spec.ContainerID == "" && isNAT
 	paths.AllowBindAttach = feat.BindAttach && runtime.GOOS != "windows" && spec.ContainerID == ""
 	paths.AllowVolumeAttach = feat.VolumeAttach && runtime.GOOS != "windows" && spec.ContainerID == ""
 	paths.RestoreLiveMounts = feat.RestoreLiveMounts
-	if HasAutoPublish(spec) && !client.HasRunFlag(context.Background(), "auto-publish") {
+	if HasAutoPublish(spec) && !feat.AutoPublish {
 		// An older rungv would refuse the run: it starts without, and
 		// reaches this computer through the ports it publishes.
 		spec = WithAutoPublish(spec, false)
@@ -519,12 +545,31 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 	var release func()
 	if s.Launch != nil {
 		if run, release, err = s.Launch(spec); err != nil {
+			if createdCheckpointDir != "" {
+				_ = os.RemoveAll(createdCheckpointDir)
+			}
 			return err
 		}
 	}
 	started := false
+	var (
+		stderr  *os.File
+		stderrW *os.File
+	)
 	defer func() {
-		if !started && release != nil {
+		if started {
+			return
+		}
+		if stderr != nil {
+			_ = stderr.Close()
+		}
+		if stderrW != nil {
+			_ = stderrW.Close()
+		}
+		if createdCheckpointDir != "" {
+			_ = os.RemoveAll(createdCheckpointDir)
+		}
+		if release != nil {
 			release()
 		}
 	}()
@@ -542,10 +587,9 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 	}
 
 	cmd := client.Command(context.Background(), args...)
-	cmd.Env = os.Environ()
 	// A pipe of its own rather than StderrPipe: on Windows a run with a
 	// terminal is started without exec.Cmd.Start (startCmd).
-	stderr, stderrW, err := os.Pipe()
+	stderr, stderrW, err = os.Pipe()
 	if err != nil {
 		return err
 	}
@@ -599,13 +643,12 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 
 	if err := startCmd(context.Background(), cmd, ptyTerm); err != nil {
 		closeOnFail()
-		_ = stderr.Close()
-		_ = stderrW.Close()
 		logs.Add(System, "failed to start: "+err.Error())
 		return err
 	}
 	closeAfterStart()
 	_ = stderrW.Close()
+	stderrW = nil
 	started = true
 
 	var eventsCtx context.Context
@@ -628,17 +671,18 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 		stdinW:       stdinW,
 		term:         ptyTerm,
 		state: State{
-			Status:       Starting,
-			PID:          cmd.Process.Pid,
-			StartedAt:    time.Now(),
-			Restored:     restoreDir,
-			Control:      paths.Control,
-			DynamicPorts: paths.Control && paths.DynamicPorts,
-			BindAttach:   bindAttach,
-			VolumeAttach: paths.Control && paths.AllowVolumeAttach,
-			LiveMounts:   bindAttach || (paths.Control && feat.KeepBlobs),
-			NetQoS:       paths.Control && feat.NetQoS && isNAT,
-			NATPolicy:    paths.Control && feat.NATPolicy && isNAT,
+			Status:           Starting,
+			PID:              cmd.Process.Pid,
+			StartedAt:        time.Now(),
+			Restored:         restoreDir,
+			Control:          paths.Control,
+			DynamicPorts:     paths.Control && paths.DynamicPorts,
+			BindAttach:       bindAttach,
+			VolumeAttach:     paths.Control && paths.AllowVolumeAttach,
+			CheckpointStream: paths.Control && feat.CheckpointStream,
+			LiveMounts:       bindAttach || (paths.Control && feat.KeepBlobs),
+			NetQoS:           paths.Control && feat.NetQoS && isNAT,
+			NATPolicy:        paths.Control && feat.NATPolicy && isNAT,
 		},
 	}
 	if spec.ReadyPattern == "" {
@@ -649,6 +693,7 @@ func (s *Supervisor) launch(spec Spec, restoreDir string) error {
 	if s.procs == nil {
 		s.procs = map[string]*proc{}
 	}
+	delete(s.starting, spec.ID)
 	s.procs[spec.ID] = p
 	s.mu.Unlock()
 	s.notify(Event{ID: spec.ID, Kind: EventChanged, State: s.State(spec.ID)})
@@ -686,6 +731,16 @@ func (s *Supervisor) volumeHolderLocked(spec Spec) string {
 		for _, v := range p.spec.Volumes() {
 			if want[v] {
 				return p.spec.Name
+			}
+		}
+	}
+	for id, st := range s.starting {
+		if id == spec.ID {
+			continue
+		}
+		for _, v := range st.Volumes() {
+			if want[v] {
+				return st.Name
 			}
 		}
 	}
@@ -808,14 +863,16 @@ func (s *Supervisor) exited(id string, p *proc, err error) {
 		_ = os.RemoveAll(p.paths.CheckpointDir)
 	}
 	st := p.state
-	// Before done: a Start waiting on Stop must find the run released, or
-	// the release would undo what that Start's Launch did.
-	if p.release != nil {
-		p.release()
-		p.release = nil
+	// Release outside s.mu to avoid lock-order inversion with external hooks,
+	// while still closing p.done only after release completes so a Start
+	// waiting on Stop sees the run released.
+	release := p.release
+	p.release = nil
+	s.mu.Unlock()
+	if release != nil {
+		release()
 	}
 	close(p.done)
-	s.mu.Unlock()
 
 	switch st.Status {
 	case Stopped:
@@ -841,9 +898,17 @@ func (s *Supervisor) Stop(id string, timeout time.Duration) error {
 		return nil
 	}
 	if s.StopGrace != nil && p.state.Control && p.paths.ControlSocket != "" {
-		if grace, ok := s.StopGrace(p.spec, timeout); ok {
-			s.mu.Unlock()
+		spec := p.spec.Clone()
+		stopGrace := s.StopGrace
+		s.mu.Unlock()
+		if grace, ok := stopGrace(spec, timeout); ok {
 			return s.Shutdown(id, "SIGTERM", grace)
+		}
+		s.mu.Lock()
+		p = s.procs[id]
+		if p == nil || !p.state.Status.Active() {
+			s.mu.Unlock()
+			return nil
 		}
 	}
 	p.stopping = true
@@ -934,7 +999,7 @@ func (s *Supervisor) Checkpoint(ctx context.Context, id string, leaveRunning boo
 		s.mu.Unlock()
 		return "", errors.New("sandboxes with GPU acceleration cannot be snapshotted")
 	}
-	if p.paths.ControlSocket == "" || (!p.state.Control && p.paths.CheckpointDir == "") {
+	if p.paths.ControlSocket == "" || (!p.state.CheckpointStream && p.paths.CheckpointDir == "") {
 		s.mu.Unlock()
 		return "", ErrNoCheckpoint
 	}
@@ -943,7 +1008,7 @@ func (s *Supervisor) Checkpoint(ctx context.Context, id string, leaveRunning boo
 		return "", errors.New("Resume the sandbox first")
 	}
 	paths := p.paths
-	stateControl := p.state.Control
+	canStream := p.state.CheckpointStream
 	done := p.done
 	p.checkpointing = true
 	if !leaveRunning {
@@ -963,7 +1028,7 @@ func (s *Supervisor) Checkpoint(ctx context.Context, id string, leaveRunning boo
 		resetPending()
 		return "", rungv.ErrNotFound
 	}
-	useStream := stateControl && (paths.CheckpointDir == "" || bundleComplete(paths.CheckpointDir))
+	useStream := canStream && (paths.CheckpointDir == "" || bundleComplete(paths.CheckpointDir))
 	destDir := paths.CheckpointDir
 	if useStream {
 		if err := os.MkdirAll(s.SnapshotRoot(id), 0o700); err != nil {
@@ -1149,13 +1214,39 @@ func (s *Supervisor) Snapshots(id string) []Snapshot {
 		}
 		out = append(out, snap)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].Time.Equal(out[j].Time) {
-			return out[i].Time.After(out[j].Time)
-		}
-		return out[i].Name > out[j].Name
-	})
+	slices.SortFunc(out, CompareSnapshots)
 	return out
+}
+
+// CompareSnapshots orders snapshots newest first, breaking same-second ties
+// numerically on a trailing "-N" counter (e.g. "-10" before "-9") and then
+// lexicographically on Name and Dir for deterministic display.
+func CompareSnapshots(a, b Snapshot) int {
+	if !a.Time.Equal(b.Time) {
+		if a.Time.After(b.Time) {
+			return -1
+		}
+		return 1
+	}
+	if sa, sb := snapshotSuffixNum(a.Name), snapshotSuffixNum(b.Name); sa != sb {
+		if sa > sb {
+			return -1
+		}
+		return 1
+	}
+	if c := strings.Compare(b.Name, a.Name); c != 0 {
+		return c
+	}
+	return strings.Compare(b.Dir, a.Dir)
+}
+
+func snapshotSuffixNum(name string) int {
+	if len(name) > 16 && name[15] == '-' {
+		if n, err := strconv.Atoi(name[16:]); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
 }
 
 // bundleComplete reports whether dir holds a written checkpoint bundle:

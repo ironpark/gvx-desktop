@@ -71,6 +71,8 @@ type Features struct {
 	GPU bool
 	// DynamicPortAddrs: run/restore take --dynamic-ports-addr.
 	DynamicPortAddrs bool
+	// AutoPublish: run takes -auto-publish.
+	AutoPublish bool
 	// AutoPublishAddr: run/restore take --auto-publish-addr.
 	AutoPublishAddr bool
 	// NetQoS: run/restore/update take --net-tx-bps and --net-rx-bps.
@@ -86,6 +88,9 @@ type Features struct {
 	// BindSymlinks: --mount type=bind supports symlinks=virtual|contained
 	// (rungvx v0.26+).
 	BindSymlinks bool
+	// CheckpointStream: checkpoint takes -o (gvx-ctrl/2 streamed snapshots
+	// without a pre-opened -checkpoint-dir).
+	CheckpointStream bool
 }
 
 // Features reports what this rungv binary can do. A zero Features (v0.19,
@@ -94,35 +99,47 @@ func (c *Client) Features(ctx context.Context) Features {
 	if c == nil || c.Path == "" {
 		return Features{}
 	}
+	runUsage, ok := commandUsage(ctx, &runFlags, "run", c.Path)
+	if !ok {
+		return Features{}
+	}
+	hasRunFlag := func(name string) bool { return usageHasFlag(runUsage, name) }
 	f := Features{
-		Control:          c.HasRunFlag(ctx, "control-token-file"),
-		DynamicPorts:     c.HasRunFlag(ctx, "dynamic-ports"),
-		KeepBlobs:        c.HasRunFlag(ctx, "keep-blobs"),
-		UnixForward:      c.HasRunFlag(ctx, "unix-forward"),
-		BindAttach:       c.HasRunFlag(ctx, "allow-bind-attach"),
-		VolumeAttach:     c.HasRunFlag(ctx, "allow-volume-attach"),
-		VolumeOptions:    c.HasRunUsage(ctx, "ephemeral"),
-		PidsLimit:        c.HasRunFlag(ctx, "pids-limit"),
-		GPU:              c.HasRunFlag(ctx, "gpu"),
-		DynamicPortAddrs: c.HasRunFlag(ctx, "dynamic-ports-addr"),
-		AutoPublishAddr:  c.HasRunFlag(ctx, "auto-publish-addr"),
-		NetQoS:           c.HasRunFlag(ctx, "net-tx-bps"),
-		NATPolicy:        c.HasRunFlag(ctx, "nat-policy-file"),
-		VolumeDirFlag:    c.HasRunFlag(ctx, "volume-dir"),
-		BindSymlinks:     c.HasRunUsage(ctx, "symlinks="),
+		Control:          hasRunFlag("control-token-file"),
+		DynamicPorts:     hasRunFlag("dynamic-ports"),
+		KeepBlobs:        hasRunFlag("keep-blobs"),
+		UnixForward:      hasRunFlag("unix-forward"),
+		BindAttach:       hasRunFlag("allow-bind-attach"),
+		VolumeAttach:     hasRunFlag("allow-volume-attach"),
+		VolumeOptions:    strings.Contains(runUsage, "ephemeral"),
+		PidsLimit:        hasRunFlag("pids-limit"),
+		GPU:              hasRunFlag("gpu"),
+		DynamicPortAddrs: hasRunFlag("dynamic-ports-addr"),
+		AutoPublish:      hasRunFlag("auto-publish"),
+		AutoPublishAddr:  hasRunFlag("auto-publish-addr"),
+		NetQoS:           hasRunFlag("net-tx-bps"),
+		NATPolicy:        hasRunFlag("nat-policy-file"),
+		VolumeDirFlag:    hasRunFlag("volume-dir"),
+		BindSymlinks:     strings.Contains(runUsage, "symlinks="),
 	}
 	if f.Control && f.KeepBlobs {
-		f.RestoreLiveMounts = c.HasRestoreFlag(ctx, "attach-bind") && c.HasRestoreFlag(ctx, "serve")
+		if restoreUsage, ok := commandUsage(ctx, &restoreFlags, "restore", c.Path); ok {
+			f.RestoreLiveMounts = usageHasFlag(restoreUsage, "attach-bind") && usageHasFlag(restoreUsage, "serve")
+		}
+	}
+	if f.Control {
+		f.CheckpointStream = c.HasCheckpointFlag(ctx, "o")
 	}
 	return f
 }
 
-// ForgetFeatures drops what is cached of the binary at path (its run and
-// restore usage), after an install or a source build replaced it.
+// ForgetFeatures drops what is cached of the binary at path (its run,
+// restore, and checkpoint usage), after an install or a source build replaced it.
 func ForgetFeatures(path string) {
 	if path != "" {
 		runFlags.Delete(path)
 		restoreFlags.Delete(path)
+		checkpointFlags.Delete(path)
 	}
 }
 
@@ -252,10 +269,10 @@ type streamReadCloser struct {
 	reader    io.Reader
 	stderr    *bytes.Buffer
 
-	mu       sync.Mutex
-	eof      bool
-	closed   bool
-	closeErr error
+	mu        sync.Mutex
+	eof       bool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (s *streamReadCloser) Read(p []byte) (int, error) {
@@ -269,41 +286,34 @@ func (s *streamReadCloser) Read(p []byte) (int, error) {
 }
 
 func (s *streamReadCloser) Close() error {
-	s.mu.Lock()
-	if s.closed {
-		err := s.closeErr
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		eof := s.eof
 		s.mu.Unlock()
-		return err
-	}
-	s.closed = true
-	eof := s.eof
-	s.mu.Unlock()
 
-	aborted := !eof
-	if aborted {
-		_ = s.stdout.Close()
-		s.cancel()
-	}
-	waitErr := s.cmd.Wait()
-	s.cancel()
-
-	var err error
-	if waitErr != nil {
-		if aborted && s.parentCtx.Err() == nil && strings.TrimSpace(s.stderr.String()) == "" {
-			// Killed by an intentional early Close (e.g., StatPath after reading
-			// the first tar header) without any rungv error on stderr.
-			err = nil
-		} else if s.parentCtx.Err() != nil && strings.TrimSpace(s.stderr.String()) == "" {
-			err = s.parentCtx.Err()
-		} else {
-			err = cmdExitError(s.args, s.stderr.String(), waitErr)
+		aborted := !eof
+		if aborted {
+			_ = s.stdout.Close()
+			s.cancel()
 		}
-	}
+		waitErr := s.cmd.Wait()
+		s.cancel()
 
-	s.mu.Lock()
-	s.closeErr = err
-	s.mu.Unlock()
-	return err
+		var err error
+		if waitErr != nil {
+			if aborted && s.parentCtx.Err() == nil && strings.TrimSpace(s.stderr.String()) == "" {
+				// Killed by an intentional early Close (e.g., StatPath after reading
+				// the first tar header) without any rungv error on stderr.
+				err = nil
+			} else if s.parentCtx.Err() != nil && strings.TrimSpace(s.stderr.String()) == "" {
+				err = s.parentCtx.Err()
+			} else {
+				err = cmdExitError(s.args, s.stderr.String(), waitErr)
+			}
+		}
+		s.closeErr = err
+	})
+	return s.closeErr
 }
 
 func (c *Client) startTarStream(ctx context.Context, args []string) (io.ReadCloser, error) {
@@ -343,7 +353,7 @@ func (c *Client) startTarStream(ctx context.Context, args []string) (io.ReadClos
 
 	peek := make([]byte, n)
 	copy(peek, first[:n])
-	var reader io.Reader = io.MultiReader(bytes.NewReader(peek), stdout)
+	reader := io.MultiReader(bytes.NewReader(peek), stdout)
 	eof := errors.Is(rerr, io.EOF)
 	if eof {
 		reader = bytes.NewReader(peek)

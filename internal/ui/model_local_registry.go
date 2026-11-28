@@ -92,12 +92,18 @@ func (m *Model) ensureLocalRegServer() *localreg.Server {
 // if it is not already running, safe to call from background work such as
 // PushToRegistry.
 func (m *Model) ensureLocalRegistryStarted() error {
+	m.localRegOpMu.Lock()
+	defer m.localRegOpMu.Unlock()
+	m.localRegMu.Lock()
+	closed := m.localRegClosed
+	m.localRegMu.Unlock()
+	if closed {
+		return errors.New("local registry is shutting down")
+	}
 	srv := m.ensureLocalRegServer()
 	if srv == nil {
 		return errors.New("local registry storage directory is not configured")
 	}
-	m.localRegOpMu.Lock()
-	defer m.localRegOpMu.Unlock()
 	if !srv.Running() {
 		if err := srv.Start(); err != nil {
 			m.post(func() {
@@ -240,7 +246,7 @@ func (m *Model) reconcileLocalRegistry(srv *localreg.Server, want bool, op strin
 		m.localRegOpMu.Lock()
 		defer m.localRegOpMu.Unlock()
 		m.localRegMu.Lock()
-		desired := m.localRegDesired
+		desired := m.localRegDesired && !m.localRegClosed
 		m.localRegMu.Unlock()
 		if desired {
 			err := srv.Start()
@@ -442,14 +448,18 @@ func (m *Model) AskPruneLocalRegistry() {
 // CloseLocalRegistry stops the built-in local registry cleanly on shutdown.
 func (m *Model) CloseLocalRegistry() {
 	m.localRegMu.Lock()
+	m.localRegClosed = true
 	m.localRegDesired = false
+	m.localRegMu.Unlock()
+
+	m.localRegOpMu.Lock()
+	defer m.localRegOpMu.Unlock()
+	m.localRegMu.Lock()
 	srv := m.localReg
 	m.localRegMu.Unlock()
 	if srv == nil {
 		return
 	}
-	m.localRegOpMu.Lock()
-	defer m.localRegOpMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = srv.Stop(ctx)

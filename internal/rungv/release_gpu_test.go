@@ -74,6 +74,12 @@ func TestFindGPURendererRelease(t *testing.T) {
 	if _, ok := findGPURendererReleaseFor(rel28, []Release{rel28}, "linux", "amd64"); ok {
 		t.Fatal("expected unsupported platform to return false")
 	}
+
+	// 6. Backport published after a newer minor does not beat higher semver.
+	rel27Backport := makeRel("v0.27.2", false, true)
+	if got, ok := findGPURendererReleaseFor(rel29, []Release{rel27Backport, rel28}, "darwin", "arm64"); !ok || got.Tag != rel28.Tag {
+		t.Fatalf("semver preference = (%q, %v), want %q", got.Tag, ok, rel28.Tag)
+	}
 }
 
 func makeGPURendererTar(t *testing.T, entries []struct {
@@ -288,5 +294,63 @@ func TestExtractGPURendererTarRejectsTraversal(t *testing.T) {
 	})
 	if err := extractGPURendererTar(bytes.NewReader(badSym), t.TempDir()); err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("expected symlink escape error, got %v", err)
+	}
+
+	// Symlink-chain traversal: a/b/c -> ../.. followed by a/b/c/esc -> ../..
+	chainTar := makeGPURendererTar(t, []struct {
+		name     string
+		typeflag byte
+		body     string
+		linkname string
+		mode     int64
+	}{
+		{name: "gvx-gpu-renderer/a/b/c", typeflag: tar.TypeSymlink, linkname: "../.."},
+		{name: "gvx-gpu-renderer/a/b/c/esc", typeflag: tar.TypeSymlink, linkname: "../.."},
+		{name: "gvx-gpu-renderer/a/b/c/esc/evil", body: "escaped"},
+	})
+	if err := extractGPURendererTar(bytes.NewReader(chainTar), t.TempDir()); err == nil {
+		t.Fatal("expected symlink-chain traversal to be rejected")
+	}
+}
+
+func TestGPURendererVersionIgnoresArbitraryEnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	// Create /tmp/.../usr/local/bin/gvx-gpu-renderer and /tmp/.../usr/.version
+	bin := filepath.Join(tmp, "usr", "local", "bin", "gvx-gpu-renderer")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "usr", "local", ".version"), []byte("bogus\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GVX_GPU_RENDERER", bin)
+	if got := GPURendererVersion(""); got != "" {
+		t.Fatalf("GPURendererVersion = %q, want empty for non-bundle GVX_GPU_RENDERER path", got)
+	}
+}
+
+func TestCommandUsageDoesNotCacheExecFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0644 non-executable test is unix-only")
+	}
+	bin := filepath.Join(t.TempDir(), "rungvx")
+	// Initially non-executable (EACCES) -> must NOT cache empty usage.
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho '  -gpu string'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ForgetFeatures(bin) })
+	c := &Client{Path: bin}
+	if c.HasRunFlag(context.Background(), "gpu") {
+		t.Fatal("non-executable binary should report gpu=false")
+	}
+	// Make executable (simulating post-chmod/post-sign) -> must re-probe without ForgetFeatures.
+	if err := os.Chmod(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !c.HasRunFlag(context.Background(), "gpu") {
+		t.Fatal("expected HasRunFlag to re-probe after earlier EACCES failure")
 	}
 }

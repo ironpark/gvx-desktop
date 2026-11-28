@@ -355,21 +355,6 @@ func extUITapSem(t *testing.T, p *ggui.Probe, role ggui.Role, nameSubstr string)
 	p.PerformAction(n.ID, ggui.Action{Kind: ggui.ActionPress})
 }
 
-func extUISetTextSem(t *testing.T, p *ggui.Probe, nameSubstr, value string) {
-	t.Helper()
-	sem := p.Semantics()
-	n, ok := extUIFindSemNode(sem, ggui.RoleTextField, nameSubstr)
-	if !ok {
-		t.Fatalf("missing text field %q\n%s", nameSubstr, sem)
-	}
-	p.PerformAction(n.ID, ggui.Action{Kind: ggui.ActionFocus})
-	if !n.Offscreen && n.Rect.Size.W > 0 && n.Rect.Size.H > 0 {
-		p.Click(ggui.Pt(n.Rect.Origin.X+n.Rect.Size.W/2, n.Rect.Origin.Y+n.Rect.Size.H/2))
-	}
-	p.PerformAction(n.ID, ggui.Action{Kind: ggui.ActionSetValue, Text: value})
-	p.Frame()
-}
-
 // ---- Tests --------------------------------------------------------------
 
 func TestExtRouteHelpers(t *testing.T) {

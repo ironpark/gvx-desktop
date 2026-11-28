@@ -105,17 +105,28 @@ func findGPURendererReleaseFor(preferred Release, recent []Release, goos, goarch
 	if hasGPURendererFor(preferred, goos, goarch) {
 		return preferred, true
 	}
+	var best Release
+	var found bool
 	for _, r := range recent {
 		if !r.Prerelease && hasGPURendererFor(r, goos, goarch) {
-			return r, true
+			if !found || Newer(r.Tag, best.Tag) {
+				best = r
+				found = true
+			}
 		}
+	}
+	if found {
+		return best, true
 	}
 	for _, r := range recent {
 		if r.Prerelease && hasGPURendererFor(r, goos, goarch) {
-			return r, true
+			if !found || Newer(r.Tag, best.Tag) {
+				best = r
+				found = true
+			}
 		}
 	}
-	return Release{}, false
+	return best, found
 }
 
 // FindGPURendererRelease returns preferred if it includes gvx-gpu-renderer;
@@ -197,7 +208,14 @@ func GPURendererVersion(rungvPath string) string {
 	if bin == "" {
 		return ""
 	}
-	bundleDir := filepath.Dir(filepath.Dir(bin))
+	binDir := filepath.Dir(bin)
+	bundleDir := filepath.Dir(binDir)
+	// Only read .version from a standard gvx-gpu-renderer/bin layout so an
+	// arbitrary GVX_GPU_RENDERER override (e.g. /usr/local/bin/...) never reads
+	// an unrelated file like /usr/.version.
+	if filepath.Base(binDir) != "bin" || filepath.Base(bundleDir) != "gvx-gpu-renderer" {
+		return ""
+	}
 	data, err := os.ReadFile(filepath.Join(bundleDir, ".version"))
 	if err != nil {
 		return ""
@@ -207,7 +225,13 @@ func GPURendererVersion(rungvPath string) string {
 
 func isRegularFile(p string) bool {
 	st, err := os.Stat(p)
-	return err == nil && st.Mode().IsRegular()
+	if err != nil || !st.Mode().IsRegular() {
+		return false
+	}
+	if runtime.GOOS != "windows" && st.Mode()&0o111 == 0 {
+		return false
+	}
+	return true
 }
 
 // InstallWithOptions downloads rungvx from r, verifies it against SHA256SUMS,
@@ -280,10 +304,12 @@ func InstallGPURenderer(ctx context.Context, r Release, rungvTarget string, prog
 		return "", err
 	}
 	binPath := filepath.Join(stageDir, "bin", "gvx-gpu-renderer")
-	if !isRegularFile(binPath) {
+	if st, err := os.Lstat(binPath); err != nil || !st.Mode().IsRegular() {
 		return "", errors.New("the archive holds no bin/gvx-gpu-renderer")
 	}
-	_ = os.Chmod(binPath, 0o755)
+	if err := os.Chmod(binPath, 0o755); err != nil {
+		return "", err
+	}
 	if r.Tag != "" {
 		if err := os.WriteFile(filepath.Join(stageDir, ".version"), []byte(r.Tag+"\n"), 0o644); err != nil {
 			return "", err
@@ -322,6 +348,33 @@ func replaceDir(stageDir, destDir string) error {
 	return nil
 }
 
+func rejectSymlinkParents(root *os.Root, rel string) error {
+	dir := path.Dir(rel)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	parts := strings.Split(dir, "/")
+	cur := ""
+	for _, p := range parts {
+		if cur == "" {
+			cur = p
+		} else {
+			cur += "/" + p
+		}
+		if st, err := root.Lstat(cur); err == nil {
+			if st.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("archive entry traverses symlink parent: %q", cur)
+			}
+			if !st.IsDir() {
+				return fmt.Errorf("archive entry parent is not a directory: %q", cur)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 func extractGPURendererTar(archive io.Reader, destDir string) error {
 	gz, err := gzip.NewReader(archive)
 	if err != nil {
@@ -329,13 +382,18 @@ func extractGPURendererTar(archive io.Reader, destDir string) error {
 	}
 	defer gz.Close()
 
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
 	tr := tar.NewReader(gz)
 	var totalBytes int64
-	destClean := filepath.Clean(destDir)
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return nil
+			return gz.Close()
 		}
 		if err != nil {
 			return err
@@ -347,9 +405,8 @@ func extractGPURendererTar(archive io.Reader, destDir string) error {
 		if !ok {
 			continue
 		}
-		target := filepath.Join(destClean, filepath.FromSlash(rel))
-		if target != destClean && !strings.HasPrefix(target, destClean+string(filepath.Separator)) {
-			return fmt.Errorf("archive entry escapes destination: %q", h.Name)
+		if err := rejectSymlinkParents(root, rel); err != nil {
+			return err
 		}
 		switch h.Typeflag {
 		case tar.TypeDir:
@@ -357,12 +414,22 @@ func extractGPURendererTar(archive io.Reader, destDir string) error {
 			if mode == 0 {
 				mode = 0o755
 			}
-			if err := os.MkdirAll(target, mode|0o700); err != nil {
+			if st, err := root.Lstat(rel); err == nil && st.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("archive directory collides with symlink: %q", h.Name)
+			}
+			if err := root.MkdirAll(rel, mode|0o700); err != nil {
 				return err
 			}
-		case tar.TypeReg, tar.TypeRegA:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
+		case tar.TypeReg:
+			if parent := path.Dir(rel); parent != "." && parent != "" {
+				if err := root.MkdirAll(parent, 0o755); err != nil {
+					return err
+				}
+			}
+			if st, err := root.Lstat(rel); err == nil && st.Mode()&os.ModeSymlink != 0 {
+				if err := root.Remove(rel); err != nil {
+					return err
+				}
 			}
 			mode := os.FileMode(h.Mode) & 0o777
 			if mode == 0 {
@@ -375,7 +442,7 @@ func extractGPURendererTar(archive io.Reader, destDir string) error {
 			if remaining < 0 {
 				return errors.New("gpu renderer archive exceeds size limit")
 			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			f, err := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 			if err != nil {
 				return err
 			}
@@ -392,18 +459,20 @@ func extractGPURendererTar(archive io.Reader, destDir string) error {
 				return closeErr
 			}
 		case tar.TypeSymlink:
-			if filepath.IsAbs(h.Linkname) {
+			if filepath.IsAbs(h.Linkname) || strings.HasPrefix(filepath.ToSlash(h.Linkname), "/") {
 				return fmt.Errorf("archive symlink uses absolute target: %q", h.Linkname)
 			}
-			resolved := filepath.Clean(filepath.Join(filepath.Dir(target), filepath.FromSlash(h.Linkname)))
-			if resolved != destClean && !strings.HasPrefix(resolved, destClean+string(filepath.Separator)) {
+			resolved := path.Clean(path.Join(path.Dir(rel), filepath.ToSlash(h.Linkname)))
+			if resolved == ".." || strings.HasPrefix(resolved, "../") {
 				return fmt.Errorf("archive symlink escapes destination: %q -> %q", h.Name, h.Linkname)
 			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
+			if parent := path.Dir(rel); parent != "." && parent != "" {
+				if err := root.MkdirAll(parent, 0o755); err != nil {
+					return err
+				}
 			}
-			_ = os.Remove(target)
-			if err := os.Symlink(h.Linkname, target); err != nil {
+			_ = root.Remove(rel)
+			if err := root.Symlink(h.Linkname, rel); err != nil {
 				return err
 			}
 		}

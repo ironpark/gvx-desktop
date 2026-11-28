@@ -221,10 +221,11 @@ func (s Spec) Validate() error {
 		if err := m.validate(); err != nil {
 			return err
 		}
-		if targets[m.Target] {
-			return fmt.Errorf("Two mounts share the guest path %s.", m.Target)
+		target := path.Clean(strings.TrimSpace(m.Target))
+		if targets[target] {
+			return fmt.Errorf("Two mounts share the guest path %s.", target)
 		}
-		targets[m.Target] = true
+		targets[target] = true
 	}
 	if s.ReadOnlyRoot && s.RootfsVolume != "" {
 		return errors.New("A read-only root file system cannot be combined with a persistent root volume.")
@@ -434,11 +435,16 @@ func (s Spec) UsesGPU() bool {
 }
 
 func (m Mount) validate() error {
-	if !strings.HasPrefix(m.Target, "/") || m.Target == "/" {
+	rawTarget := strings.TrimSpace(m.Target)
+	if !strings.HasPrefix(rawTarget, "/") {
+		return fmt.Errorf("Mount target %q must be an absolute guest path other than /.", m.Target)
+	}
+	cleanTarget := path.Clean(rawTarget)
+	if cleanTarget == "/" {
 		return fmt.Errorf("Mount target %q must be an absolute guest path other than /.", m.Target)
 	}
 	for _, p := range []string{"/proc", "/sys", "/dev"} {
-		if (m.Target == p || strings.HasPrefix(m.Target, p+"/")) && !strings.HasPrefix(m.Target, "/dev/shm") {
+		if (cleanTarget == p || strings.HasPrefix(cleanTarget, p+"/")) && cleanTarget != "/dev/shm" && !strings.HasPrefix(cleanTarget, "/dev/shm/") {
 			return fmt.Errorf("Mount target %s is reserved by the guest kernel.", m.Target)
 		}
 	}
@@ -477,6 +483,9 @@ func (m Mount) validate() error {
 			return fmt.Errorf("Bind mount at %s: paths cannot contain a comma when symlinks mode is set.", m.Target)
 		}
 	case MountTmpfs:
+		if m.Size != "" && !memoryRe.MatchString(m.Size) {
+			return fmt.Errorf("Tmpfs at %s: write size as a number with a unit, such as 512m or 2g.", m.Target)
+		}
 	default:
 		return fmt.Errorf("Unknown mount type %q.", m.Type)
 	}

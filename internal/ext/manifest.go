@@ -826,7 +826,7 @@ func (m *Manifest) HasPermission(perm string) bool {
 func (m *Manifest) ToViewInfos() []ViewInfo {
 	out := make([]ViewInfo, len(m.Views))
 	for i, v := range m.Views {
-		out[i] = ViewInfo{ID: v.ID, Title: v.Title, Icon: v.Icon, Chrome: v.Chrome}
+		out[i] = ViewInfo(v)
 	}
 	return out
 }
@@ -835,7 +835,7 @@ func (m *Manifest) ToViewInfos() []ViewInfo {
 func (m *Manifest) ToCommandInfos() []CommandInfo {
 	out := make([]CommandInfo, len(m.Commands))
 	for i, c := range m.Commands {
-		out[i] = CommandInfo{ID: c.ID, Title: c.Title}
+		out[i] = CommandInfo(c)
 	}
 	return out
 }
@@ -846,12 +846,7 @@ func (m *Manifest) ToToolInfos() []ToolInfo {
 	for i, t := range m.Tools {
 		params := make([]ToolParamInfo, len(t.Params))
 		for j, p := range t.Params {
-			params[j] = ToolParamInfo{
-				Name:        p.Name,
-				Type:        p.Type,
-				Description: p.Description,
-				Required:    p.Required,
-			}
+			params[j] = ToolParamInfo(p)
 		}
 		out[i] = ToolInfo{ID: t.ID, Description: t.Description, Params: params}
 	}

@@ -25,11 +25,16 @@ import (
 	"github.com/ironpark/gvx-desktop/internal/sandbox"
 )
 
+type refLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
 type overlayState struct {
 	mu      sync.Mutex
 	fab     *overlay.Fabric
-	netinit map[string]bool        // containers whose active run started with netinit
-	applyMu map[string]*sync.Mutex // per-container serialization for live apply
+	netinit map[string]bool     // containers whose active run started with netinit
+	applyMu map[string]*refLock // per-container serialization for live apply (ref-counted)
 
 	binOnce sync.Once
 	binPath string
@@ -75,18 +80,29 @@ func (e *Engine) closeOverlay() {
 	}
 }
 
-func (e *Engine) overlayApplyLock(cid string) *sync.Mutex {
+func (e *Engine) lockOverlayApply(cid string) func() {
 	e.ovl.mu.Lock()
-	defer e.ovl.mu.Unlock()
 	if e.ovl.applyMu == nil {
-		e.ovl.applyMu = map[string]*sync.Mutex{}
+		e.ovl.applyMu = map[string]*refLock{}
 	}
-	mu := e.ovl.applyMu[cid]
-	if mu == nil {
-		mu = &sync.Mutex{}
-		e.ovl.applyMu[cid] = mu
+	rl := e.ovl.applyMu[cid]
+	if rl == nil {
+		rl = &refLock{}
+		e.ovl.applyMu[cid] = rl
 	}
-	return mu
+	rl.refs++
+	e.ovl.mu.Unlock()
+
+	rl.mu.Lock()
+	return func() {
+		rl.mu.Unlock()
+		e.ovl.mu.Lock()
+		rl.refs--
+		if rl.refs == 0 && e.ovl.applyMu[cid] == rl {
+			delete(e.ovl.applyMu, cid)
+		}
+		e.ovl.mu.Unlock()
+	}
 }
 
 func (e *Engine) markStartedWithNetinit(id string) {
@@ -258,9 +274,8 @@ func (e *Engine) leaveOverlay(id string) {
 // cannot cancel an in-flight apply, and roll back only if neither the peer
 // generation nor the committed addresses have moved on.
 func (e *Engine) applyOverlayLive(cid string) {
-	mu := e.overlayApplyLock(cid)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := e.lockOverlayApply(cid)
+	defer unlock()
 
 	c, err := e.lookup(cid)
 	if err != nil || c.State.Status != StatusRunning {

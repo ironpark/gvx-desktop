@@ -205,14 +205,6 @@ func usageModel(t *testing.T, dockerd http.HandlerFunc) (*Model, *ggui.Probe, sa
 	return m, p, web
 }
 
-func atoi(s string) int {
-	n := 0
-	for _, r := range s {
-		n = n*10 + int(r-'0')
-	}
-	return n
-}
-
 func TestContainerUsageWhileThePageShows(t *testing.T) {
 	var mu sync.Mutex
 	var asked []string

@@ -368,7 +368,7 @@ func logsView(m *Model, current ggui.Readable[Row]) ggui.Widget {
 		if showDmesg {
 			return logViewer(m, m.DmesgLines, tr("No kernel log entries."),
 				switchBtn,
-				tip(iconButton(lucide.RefreshCw, tr("Refresh kernel logs"), func() { m.LoadSandboxDmesg(ggui.Peek(m.Selected)) }), tr("Refresh")))
+				tip(iconButton(lucide.RefreshCw, tr("Refresh kernel logs"), func() { m.LoadSandboxDmesg(ggui.Peek(m.Selected)) }).BindDisabled(m.DmesgLoading), tr("Refresh")))
 		}
 		return logViewer(m, m.Logs, tr("No output yet. Start the sandbox to see what it writes."),
 			switchBtn,
@@ -668,31 +668,33 @@ func configView(m *Model, s sandbox.Spec) ggui.Widget {
 	if s.HostCACerts {
 		sec += tr(", trusts host root certificates")
 	}
-	snapSummary := tr("off")
-	switch {
-	case s.UsesGPU():
-		snapSummary = tr("unavailable with GPU acceleration")
-	case s.Checkpoint:
-		snapSummary = tr("enabled (control socket + bundle directory)")
-	case ggui.Peek(m.RungvFeatures).Control:
-		snapSummary = tr("on demand (control socket)")
-	}
-	return widget.Padding(widget.Column(
-		ui.CodeBlock(line).Header(tr("Command line")).Language("sh").CopyButton(true).Small(),
-		widget.Column(
-			kvText(tr("Image"), s.Image),
-			kvText(tr("Command"), s.Command),
-			kvText(tr("Environment"), join(s.Env)),
-			kvText(tr("Environment files"), join(s.EnvFiles)),
-			kvText(tr("Mounts"), join(mounts)),
-			kvText(tr("Network"), net),
-			kvText(tr("Limits"), strings.Join(limits, ", ")),
-			kvText(tr("Security"), sec),
-			kvText(tr("Snapshots"), snapSummary),
-			kvText(tr("Start with app"), startsWithApp(s)),
-			kvText(tr("Ready when log has"), s.ReadyPattern),
-		).Gap(8).Stretch(),
-	).Gap(14).Stretch(), 8, 0)
+	return ggui.View(m.RungvFeatures, func(f rungv.Features) ggui.Widget {
+		snapSummary := tr("off")
+		switch {
+		case s.UsesGPU():
+			snapSummary = tr("unavailable with GPU acceleration")
+		case s.Checkpoint:
+			snapSummary = tr("enabled (control socket + bundle directory)")
+		case f.CheckpointStream:
+			snapSummary = tr("on demand (control socket)")
+		}
+		return widget.Padding(widget.Column(
+			ui.CodeBlock(line).Header(tr("Command line")).Language("sh").CopyButton(true).Small(),
+			widget.Column(
+				kvText(tr("Image"), s.Image),
+				kvText(tr("Command"), s.Command),
+				kvText(tr("Environment"), join(s.Env)),
+				kvText(tr("Environment files"), join(s.EnvFiles)),
+				kvText(tr("Mounts"), join(mounts)),
+				kvText(tr("Network"), net),
+				kvText(tr("Limits"), strings.Join(limits, ", ")),
+				kvText(tr("Security"), sec),
+				kvText(tr("Snapshots"), snapSummary),
+				kvText(tr("Start with app"), startsWithApp(s)),
+				kvText(tr("Ready when log has"), s.ReadyPattern),
+			).Gap(8).Stretch(),
+		).Gap(14).Stretch(), 8, 0)
+	})
 }
 
 // startsWithApp says whether a sandbox starts with the app: one set to
@@ -709,22 +711,6 @@ func startsWithApp(s sandbox.Spec) string {
 
 func sandboxSnapshots(m *Model, r Row) ggui.Widget {
 	id := r.Spec.ID
-	if r.Spec.UsesGPU() {
-		return widget.Padding(ui.Alert(tr("Snapshots are unavailable with GPU acceleration"),
-			tr("rungvx does not support checkpoint and restore while GPU acceleration (-gpu) is enabled. Turn GPU acceleration off to take snapshots.")).
-			Icon(icons.Info), 8, 0)
-	}
-	if !r.Spec.Checkpoint && !r.State.Control && !ggui.Peek(m.RungvFeatures).Control {
-		return widget.Padding(ui.Alert(tr("Snapshots are off for this sandbox"),
-			tr("A snapshot needs a control socket and a bundle directory opened before the guest starts. Turn snapshots on, then restart the sandbox.")).
-			Icon(icons.Info).
-			Action(ui.Button(tr("Turn on"), func() {
-				spec := r.Spec.Clone()
-				spec.Checkpoint = true
-				m.OpenEditor(spec)
-			}).Size(ui.ButtonExtraSmall).Outline()), 8, 0)
-	}
-	running := r.State.Status.Active() && r.State.Status != sandbox.Stopping && !r.State.Paused && (r.Spec.Checkpoint || r.State.Control)
 	snaps := ggui.Map(m.Snapshots, func(all []sandbox.Snapshot) []sandbox.Snapshot {
 		var out []sandbox.Snapshot
 		for _, s := range all {
@@ -734,14 +720,38 @@ func sandboxSnapshots(m *Model, r Row) ggui.Widget {
 		}
 		return out
 	})
-	return widget.Padding(widget.Column(
-		widget.Row(
-			ui.Button(tr("Snapshot and stop"), func() { m.Checkpoint(id, false) }).Disabled(!running).Icon(glyph(lucide.Camera, 14)),
-			ui.Button(tr("Snapshot, keep running"), func() { m.Checkpoint(id, true) }).Outline().Disabled(!running),
-		).Gap(8),
-		ui.Caption(tr("A snapshot holds the task graph, memory pages, volumes and network namespaces. Restoring needs the same mounts, which this sandbox's settings provide.")),
-		snapshotList(m, snaps, false, ggui.Const(tr("No snapshots yet."))),
-	).Gap(12).Stretch(), 8, 0)
+	return ggui.View(m.RungvFeatures, func(f rungv.Features) ggui.Widget {
+		if r.Spec.UsesGPU() {
+			return widget.Padding(widget.Column(
+				ui.Alert(tr("Snapshots are unavailable with GPU acceleration"),
+					tr("rungvx does not support checkpoint and restore while GPU acceleration (-gpu) is enabled. Turn GPU acceleration off to take snapshots.")).
+					Icon(icons.Info),
+				snapshotList(m, snaps, false, ggui.Const(tr("No snapshots yet."))),
+			).Gap(12).Stretch(), 8, 0)
+		}
+		if !r.Spec.Checkpoint && !r.State.CheckpointStream && !f.CheckpointStream {
+			return widget.Padding(widget.Column(
+				ui.Alert(tr("Snapshots are off for this sandbox"),
+					tr("A snapshot needs a control socket and a bundle directory opened before the guest starts. Turn snapshots on, then restart the sandbox.")).
+					Icon(icons.Info).
+					Action(ui.Button(tr("Turn on"), func() {
+						spec := r.Spec.Clone()
+						spec.Checkpoint = true
+						m.OpenEditor(spec)
+					}).Size(ui.ButtonExtraSmall).Outline()),
+				snapshotList(m, snaps, false, ggui.Const("")),
+			).Gap(12).Stretch(), 8, 0)
+		}
+		running := r.State.Status.Active() && r.State.Status != sandbox.Stopping && !r.State.Paused && (r.Spec.Checkpoint || r.State.CheckpointStream)
+		return widget.Padding(widget.Column(
+			widget.Row(
+				ui.Button(tr("Snapshot and stop"), func() { m.Checkpoint(id, false) }).Disabled(!running).Icon(glyph(lucide.Camera, 14)),
+				ui.Button(tr("Snapshot, keep running"), func() { m.Checkpoint(id, true) }).Outline().Disabled(!running),
+			).Gap(8),
+			ui.Caption(tr("A snapshot holds the task graph, memory pages, volumes and network namespaces. Restoring needs the same mounts, which this sandbox's settings provide.")),
+			snapshotList(m, snaps, false, ggui.Const(tr("No snapshots yet."))),
+		).Gap(12).Stretch(), 8, 0)
+	})
 }
 
 func snapshotList(m *Model, snaps ggui.Readable[[]sandbox.Snapshot], showSandbox bool, emptyText ggui.Readable[string]) ggui.Widget {

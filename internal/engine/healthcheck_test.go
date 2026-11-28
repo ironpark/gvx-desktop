@@ -194,7 +194,9 @@ func TestHealthcheckLifecycleTransitionsAndEvents(t *testing.T) {
 	if st, body := te.do(t, http.MethodPost, "/containers/hc-app/stop?t=1", nil); st != http.StatusNoContent {
 		t.Fatalf("stop = %d %s", st, body)
 	}
-	st, body = te.do(t, http.MethodGet, "/containers/hc-app/json", nil)
+	if st, body = te.do(t, http.MethodGet, "/containers/hc-app/json", nil); st != http.StatusOK {
+		t.Fatalf("inspect stopped = %d %s", st, body)
+	}
 	var insStopped containerInspectResponse
 	_ = json.Unmarshal(body, &insStopped)
 	if insStopped.State.Health == nil || insStopped.State.Health.Status != HealthUnhealthy {

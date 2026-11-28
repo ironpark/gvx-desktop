@@ -503,7 +503,7 @@ func detectArchiveArches(rs io.ReadSeeker) []string {
 			if err != nil {
 				break
 			}
-			if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+			if hdr.Typeflag != tar.TypeReg {
 				continue
 			}
 			clean := cleanArchivePath(hdr.Name)
